@@ -104,6 +104,7 @@ const run = await this.ctx.subagents.start("spawn", {
 ### 6. Client 半：bundle 格式
 
 - 必须 `window.__ModuleLoader__.load({ id, factory })`，`exports.inject = ["slots", "remote"]`。
+- **按钮一律用官方 Button 原子**：`const ui = require("@deepseek-ai/dsh-client-ui-primitives")`，`h(ui.Button, { variant: "primary"|"ghost"|"outline", size: "sm", onClick }, "…")`。自定义 `.aapr-btn` 按钮样式已移除——它不跟 `--dsw-alias-button-*` token 家族，深色模式下难看（与 dsh-memory-manager 踩过的同一个坑，同一个修法）。
 - **Remote 命名空间必须自挂载**：`await ctx.remote.$mount(CLIENT_REMOTE)`（dsh-api-remotes 只挂载官方命名空间），然后 `ctx.get("remote.agentApproval")`。描述符与 `typert.host.js` 的 invocation 一一对应；浏览器没有 zod，用 passthrough schema（`{ parse: (v) => v }`）。
 - **返回值双层信封**：gateway 返回 `res.value` = Host 方法的 `{ ok, value }` 信封，client 的 `pick()` 做容忍双形状解包 + 双层错误上抛（token-stats 踩过"多包一层"的坑）。
 - **CSS 注入**用 `document.createElement("style")` + `ctx.effect(() => () => styleTag.remove())`；样式一律用 `--dsw-alias-*` 主题变量。
@@ -114,14 +115,15 @@ const run = await this.ctx.subagents.start("spawn", {
 
 权限菜单（输入框 `/permission` 控件）的选项来自 **`dsh-permission-presets` 的 Config 预设表**；Web 端切换 = 执行 `/permission <preset>` 命令 → 追加 `permission/preset` 事件 + 旋钮事件。要让「Agent 审批」出现在菜单里：
 
-1. **install.mjs 在 profile patch 里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / danger-full-access / agent-approval）——DSH 升级若改了基础表要手动同步。
-2. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：chip/命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；chip 关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
-3. **事件联动**（`session/event` 监听 `permission/preset`）：
+1. **install.mjs 在 profile patch 里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / **agent-approval** / danger-full-access）——**声明顺序即菜单顺序**，agent-approval 排在 Full access 上面；DSH 升级若改了基础表要手动同步。管理块**无条件剥离重追加**（幂等），改顺序后重跑安装脚本即可自愈。
+2. **菜单图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`**（菜单行 + 触发按钮共用；源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**。install.mjs 的 `patchPermissionGlyph()` 直接补丁该编译产物：往 `const permissionGlyphs = {` 后插入 `agent-approval` 条目（描边盾牌 + 填充 AI 星形，与出厂三个图标同风格同 viewBox）。幂等；**DSH 升级会重装原版 bundle，重跑安装脚本即可再补丁**；找不到锚点时降级为警告（菜单只是没图标，功能不受影响）。
+3. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：chip/命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；chip 关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
+4. **事件联动**（`session/event` 监听 `permission/preset`）：
    - 选中 `agent-approval` → `_enableCore`（此刻旋钮事件还没落，捕获的 prev 恰是切换前的值；我们写的旋钮值与预设服务随后要写的相同，它检查后跳过，无重复事件）。
    - 选中其他预设 → 只删 bookkeeping，**不恢复旋钮**（预设服务马上写自己的旋钮，恢复会打架）。
-4. **跨重启存活**：`agent/created` 监听在（重）发布时折叠日志——`permission/preset` 折出 `agent-approval` 就重新启用。spawn 的审批员子会话不带 preset 事件（无 seed），不会递归重启用；fork 子会话 seed 里可能带父级的 preset 事件 → 会继承该模式（有意语义：模式跟随会话的工作；"later child switches win" 是官方允许的后来者覆盖）。
-5. **防御**：`_presetRegistered()` 先确认表里有 `agent-approval` 才追加 preset 事件——没装覆盖行时，追加会被会话不变量（unknown preset）直接抛错。
-6. chip 每 10s 轮询一次 enabled 状态（菜单/命令切换后 chip 也能跟上；InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询）。
+5. **跨重启存活**：`agent/created` 监听在（重）发布时折叠日志——`permission/preset` 折出 `agent-approval` 就重新启用。spawn 的审批员子会话不带 preset 事件（无 seed），不会递归重启用；fork 子会话 seed 里可能带父级的 preset 事件 → 会继承该模式（有意语义：模式跟随会话的工作；"later child switches win" 是官方允许的后来者覆盖）。
+6. **防御**：`_presetRegistered()` 先确认表里有 `agent-approval` 才追加 preset 事件——没装覆盖行时，追加会被会话不变量（unknown preset）直接抛错。
+7. chip 每 10s 轮询一次 enabled 状态（菜单/命令切换后 chip 也能跟上；InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询）。
 
 ### 8. 本地安装 = 复制包 + composition patch
 
@@ -140,12 +142,12 @@ const run = await this.ctx.subagents.start("spawn", {
     presets:
       read-only: { sandbox: read-only, approval: ask }
       workspace-write: { sandbox: workspace-write, approval: ask }
-      danger-full-access: { sandbox: danger-full-access, approval: never }
       agent-approval:
         sandbox: workspace-write
         approval: ask
         name: Agent 审批
         description: workspace-write base; an independent approval agent judges every escalation, risky ones are rejected.
+      danger-full-access: { sandbox: danger-full-access, approval: never }
 ```
 
 3. 重启 DSH。**必须重启**，Host 加载、typert 注册、client bundle 注入都在启动时发生。
