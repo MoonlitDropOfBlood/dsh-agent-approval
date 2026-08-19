@@ -394,7 +394,7 @@ window.__ModuleLoader__.load({
           h(
             "div",
             { className: "aapr-card" },
-            h("h3", null, "审批记录（最近 50 条，进程内保留 200 条）"),
+            h("h3", null, "审批记录（最近 50 条，本地持久化保留 200 条，重启不丢）"),
             h(
               "div",
               { className: "aapr-row" },

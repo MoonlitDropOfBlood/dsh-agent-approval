@@ -10,7 +10,7 @@
 - 审批 Agent 在**独立会话**里运行：零父级上下文、全局工具全部空白（`toolFilter: {allow:[]}`）、审批策略被委派机制钉死为 `never`（不可能递归再审批），必须通过 `structured_output` 结构化工具给出裁决：`{ decision: approve|reject, riskLevel, rationale }`。
 - **风险即拒绝**：破坏性 / 不可逆 / 越界 / 理由与实际参数不符 → `reject`；只有"安全、可逆、与任务相符、理由诚实"才 `approve`。
 - **Fail-closed**：审批 Agent 启动失败、超时、结果不合法、请求被取消 → 一律按拒绝处理（`unavailable`/`cancelled`），绝不静默放行。
-- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或 Harness 默认模型）、审批超时、查看已开启会话、**最近审批记录（审计）**（结论/风险/模型/耗时/理由，悬停看完整理由与工具参数）。
+- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或 Harness 默认模型）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话、**最近审批记录（审计，本地持久化）**（结论/风险/模型/耗时/理由，悬停看完整理由与工具参数）。
 - 输入框 `/permission` 菜单的「Agent 审批」预设 + `/agent-approval on|off` 命令为当前会话开关（**刻意没有 composer chip**——开关本就属于权限菜单，菜单旁边再放一个属冗余，已移除）；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
 
 ## 目录结构
@@ -94,12 +94,13 @@ const run = await this.ctx.subagents.start("spawn", {
 - **不会递归审批**：DSH 委派机制自动把子代理的审批策略钉死为 `never`（`captureDelegatedPolicyOverrides`），子代理自己提权只会被直接拒绝。
 - **结果读取**：`run.result`（Promise，不 reject 业务失败）→ `result.structured`（合法裁决）+ `result.stopReason === "completed"`。两者任一不满足 → `unavailable`（fail-closed）。
 - **竞速**：`Promise.race([run.result, abortRace, this.ctx.timeout(timeoutMs)])`，`finally` 里 `run.dispose()`。超时/取消/基础设施故障分别映射 `unavailable`/`cancelled`。
-- **给审批员看的材料**：从会话日志按 `callId` 倒查 `tool/call` 事件的 `arguments` 原始 JSON（**精确命令**，不是转述），加上 `req.reason`（工具方的提权理由）和 workspace cwd。审批提示词明确 APPROVE 四条件与 REJECT 清单，并要求"存疑即拒"。
+- **给审批员看的材料**：从会话日志按 `callId` 倒查 `tool/call` 事件的 `arguments` 原始 JSON（**精确命令**，不是转述）、`req.reason`（工具方的提权理由）、workspace cwd、以及**最近 2 条真实用户消息**（`user/message` 且 `source.kind === "user"`，每条截断 800——任务的 ground truth）。审批提示词明确 APPROVE 四条件与 REJECT 清单，并要求"存疑即拒"。
+- **裁决一致性口径**：判"操作 vs 用户任务"的**客观对齐**，不依赖请求方理由的措辞水平——理由只是辅助证据：操作本身明显安全且与任务相符时，理由写得简略**不拒**；但理由与实际参数造假/不符仍**照拒**（读过审核标准的 agent 不能靠文笔获得优待）。
 - **开发流程口径**（端到端任务不被卡死的关键）：提权档位只有粗粒度两档，审批员**判实际操作而非档位名**——项目自带的安装/构建/部署脚本写其文档指定的安装路径（如工具自身 profile 目录）、覆盖自身已安装的文件（可从源码再生成）、读调试所需的工具自有配置/日志，都算"任务明确所需"可 approve；但**修改操作系统或其他应用的数据**仍一律 reject。
 
 ### 5. 审计记录
 
-- 内存环形数组，上限 200 条，`getState()` 返回倒序最近 50 条。每条：时间、会话（短 id）、工具、结论、风险等级、审批模型、耗时、理由（截断 600）、`childSessionId`（审批 Agent 自己的会话短 id——在会话列表里能找到完整推理记录）。
+- 内存环形数组，上限 200 条，`getState()` 返回倒序最近 50 条；**每条同时追加落盘** `<DSH_HOME>/agent-approval/records.jsonl`（JSONL，一行一条），启动时读回最近 200 条并把文件压实回上限（防无限增长），`clearRecords` 同步清空文件。每条：时间、会话（短 id）、工具、结论、风险等级、审批模型、耗时、理由（截断 600）、`childSessionId`（审批 Agent 自己的会话短 id——在会话列表里能找到完整推理记录）。
 - **必须整形状构造**（`typert.host.js` 的 result schema 是 strict）：每个字段都在、类型正确，数组用 `.readonly()`。新增字段要同步改三处（index.js 构造、typert schema、client 展示）。
 
 ### 6. Client 半：bundle 格式
@@ -179,4 +180,4 @@ node scripts/install.mjs # 安装到本机 DSH profile
 - 声称（claim）的范围是"该会话的**所有** approval 请求"——不止 pwsh/bash 提权，也包括任何 `tools/pre-execute` 产生的人工 ask。这是有意语义（"帮我审批"），提示词写成通用审批口径。
 - `approval.setPolicy` 会在模型上下文里注入 "changed by the user" 通知——用户确实主动开了开关，语义可接受；不要绕开它手写 `approval/policy` 事件（会丢失通知）。
 - 审批模型未配置时使用 **Harness 默认路由**（`agentDefaultModel.currentSelection()`；该可选服务缺席或解析为空时才退化为继承请求会话路由）；配置后走 `agentOptions` 精确覆盖。**刻意不跟随请求会话的模型**——审批口径必须稳定可预期，不随各会话的模型切换而漂移。
-- 审计记录是**进程内存态**（重启清空）；DSH 的权威审计仍在会话日志的 `approval/asked` + `approval/decided` 事件对（本插件不破坏该配对，只在瀑布层给结论）。
+- 审计记录**持久化**在 `<DSH_HOME>/agent-approval/records.jsonl`（重启保留最近 200 条）；审批模型与超时持久化在同目录 `config.json`（重启恢复，不再回落默认）。持久化失败是 best-effort 静默降级（内存态仍可用），绝不影响审批主流程。DSH 的权威审计仍在会话日志的 `approval/asked` + `approval/decided` 事件对（本插件不破坏该配对，只在瀑布层给结论）。
