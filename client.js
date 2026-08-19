@@ -201,17 +201,25 @@ window.__ModuleLoader__.load({
         React.useEffect(() => {
           if (sessionId === undefined) return undefined;
           let alive = true;
-          remote
-            .getState()
-            .then((res) => {
-              const s = pick(res);
-              if (!alive || !s) return;
-              setOn(s.enabledSessions.indexOf(String(sessionId)) !== -1);
-              setReady(true);
-            })
-            .catch(() => {});
+          const read = () => {
+            remote
+              .getState()
+              .then((res) => {
+                const s = pick(res);
+                if (!alive || !s) return;
+                setOn(s.enabledSessions.indexOf(String(sessionId)) !== -1);
+                setReady(true);
+              })
+              .catch(() => {});
+          };
+          read();
+          // The mode can also be switched from the permission menu (the
+          // /permission control) and the /agent-approval command — poll so
+          // the chip stays truthful without a remount.
+          const t = setInterval(read, 10000);
           return () => {
             alive = false;
+            clearInterval(t);
           };
         }, [sessionId]);
 

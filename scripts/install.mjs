@@ -65,6 +65,44 @@ function insertBlock() {
   );
 }
 
+/**
+ * Build the `- id: permission` override that registers the Agent 审批 entry
+ * in the permission-preset table (the composer /permission menu). A patch
+ * REPLACES the targeted row's whole config rather than merging, so the full
+ * table is restated here — keep it in sync with the dsh-base bundle's row
+ * when upgrading DSH.
+ */
+function permissionOverrideBlock() {
+  return (
+    "# --- dsh-agent-approval: register the Agent 审批 preset in the permission menu ---\n" +
+    "# (managed by scripts/install.mjs — restates the full presets table because a\n" +
+    "# patch replaces the `permission` row's whole config; re-sync with dsh-base on upgrade)\n" +
+    "- id: permission\n" +
+    "  name: '@deepseek-ai/dsh-permission-presets'\n" +
+    "  config:\n" +
+    "    presets:\n" +
+    "      read-only:\n" +
+    "        sandbox: read-only\n" +
+    "        approval: ask\n" +
+    "      workspace-write:\n" +
+    "        sandbox: workspace-write\n" +
+    "        approval: ask\n" +
+    "      danger-full-access:\n" +
+    "        sandbox: danger-full-access\n" +
+    "        approval: never\n" +
+    "      agent-approval:\n" +
+    "        sandbox: workspace-write\n" +
+    "        approval: ask\n" +
+    "        name: Agent 审批\n" +
+    "        description: workspace-write base; an independent approval agent judges every escalation, risky ones are rejected.\n"
+  );
+}
+
+/** True when the permission override block is already present. */
+function hasPermissionOverride(text) {
+  return text.includes("presets:") && text.includes("\n      agent-approval:");
+}
+
 /** True when the patch body is effectively empty (a bare `[]` or blank). */
 function isEmptyPatch(text) {
   const body = text
@@ -84,21 +122,31 @@ async function ensurePatch() {
   if (existsSync(PATCH_FILE)) {
     text = await readFile(PATCH_FILE, "utf8");
   }
-  if (text.includes(`name: '${PKG_NAME}'`)) {
-    log("patch", "plugin row already present, skipping");
-    return false;
-  }
-  const block = insertBlock();
-  if (isEmptyPatch(text)) {
-    await writeFile(PATCH_FILE, block, "utf8");
-    log("patch", `replaced empty patch in ${PATCH_FILE}`);
+  let changed = false;
+  if (!text.includes(`name: '${PKG_NAME}'`)) {
+    const block = insertBlock();
+    if (isEmptyPatch(text)) {
+      text = block;
+      log("patch", `replaced empty patch in ${PATCH_FILE}`);
+    } else {
+      const trimmed = text.trimEnd();
+      text = trimmed.length === 0 ? block : trimmed + "\n\n" + block;
+      log("patch", `added mount row to ${PATCH_FILE}`);
+    }
+    changed = true;
   } else {
-    const trimmed = text.trimEnd();
-    const next = trimmed.length === 0 ? block : trimmed + "\n\n" + block;
-    await writeFile(PATCH_FILE, next, "utf8");
-    log("patch", `added mount row to ${PATCH_FILE}`);
+    log("patch", "plugin row already present, skipping");
   }
-  return true;
+  if (!hasPermissionOverride(text)) {
+    const trimmed = text.trimEnd();
+    text = trimmed.length === 0 ? permissionOverrideBlock() : trimmed + "\n\n" + permissionOverrideBlock();
+    log("patch", `added permission preset override to ${PATCH_FILE}`);
+    changed = true;
+  } else {
+    log("patch", "permission preset override already present, skipping");
+  }
+  if (changed) await writeFile(PATCH_FILE, text, "utf8");
+  return changed;
 }
 
 /**

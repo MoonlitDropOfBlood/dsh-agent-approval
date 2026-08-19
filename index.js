@@ -48,6 +48,12 @@ import { Service } from "@deepseek-ai/cordis";
 
 /** The sandbox mode an enabled session is pinned to while the mode is ON. */
 const BASE_MODE = "workspace-write";
+/**
+ * The permission-preset table key this plugin registers (via the profile's
+ * `permission` row override — see scripts/install.mjs). Selecting it in the
+ * permission menu (or `/permission agent-approval`) enables the mode.
+ */
+const PRESET_NAME = "agent-approval";
 /** Default / clamp bounds for the judge timeout (milliseconds, fail-closed). */
 const DEFAULT_TIMEOUT_MS = 120000;
 const MIN_TIMEOUT_MS = 30000;
@@ -184,6 +190,56 @@ export class AgentApprovalService extends TypertRemoteService {
     // untouched.
     this.ctx.on("approval/request", (req, next) => this._onApprovalRequest(req, next), { prepend: true });
 
+    // Permission-menu integration: react to preset selections recorded in the
+    // durable log (the composer /permission control and the /permission
+    // command both write `permission/preset` through permissionPresets.set).
+    // Selecting our entry enables the judging mode; selecting anything else
+    // disables it WITHOUT restoring knobs — the preset service writes its own
+    // knob events right after the selection event, and restoring ours in that
+    // window would fight the user's explicit choice.
+    this.ctx.on("session/event", (session, event) => {
+      try {
+        if (!event || event.type !== "permission/preset") return;
+        const name = event.data && event.data.preset;
+        if (name === PRESET_NAME) {
+          if (this._enabled.has(session.id)) return;
+          const agent = this.ctx.agents.get(session.id);
+          if (agent === undefined) return; // not live (yet) — agent/created covers it
+          this._enableCore(session, agent);
+        } else if (this._enabled.has(session.id)) {
+          this._enabled.delete(session.id);
+        }
+      } catch (e) {
+        /* an emit listener must never throw */
+      }
+    });
+
+    // Re-arm on (re)publication: a session whose durable log folds to the
+    // agent-approval preset — resumed after a restart, or freshly created
+    // with it as the default — gets its judging mode back. This is what makes
+    // the mode survive restarts. Subagent children never carry the preset
+    // event (delegation seeds only sandbox/approval), so they stay out.
+    this.ctx.on("agent/created", (payload) => {
+      try {
+        const agent = payload && payload.agent;
+        if (!agent || !agent.session) return;
+        if (this._enabled.has(agent.session.id)) return;
+        if (this._lastKnob(agent.session, "permission/preset", "preset") !== PRESET_NAME) return;
+        this._enableCore(agent.session, agent);
+      } catch (e) {
+        /* best-effort re-arm */
+      }
+    });
+
+    // A disposed session's bookkeeping entry is dead weight — drop it.
+    this.ctx.on("session/disposed", (session) => {
+      try {
+        if (session) this._enabled.delete(session.id);
+      } catch (e) {
+        /* cleanup only */
+      }
+    });
+
     // Optional capability surfaces — each child activates only when its
     // registry is composed, and unwinds with it.
     this.ctx.inject(["systemPrompt"], (scope) => {
@@ -243,36 +299,104 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
-   * Toggle the mode for one live agent's session.
-   *
-   * ON:  remember the session's EFFECTIVE knob values (override ?? defaults —
-   *      a session living under a `never` composition default must return to
-   *      `never`, not to the fold's "no override" state), then pin sandbox to
-   *      workspace-write and approval policy to `ask` (the waterfall — and
-   *      therefore our claimer — only runs under `ask`; under `never` the
-   *      approval service short-circuits to `rejected` before any listener).
-   * OFF: restore the remembered values through the canonical setters (both
-   *      no-op when unchanged).
+   * Toggle the mode for one live agent's session (the client chip and the
+   * /agent-approval command land here). Delegates to the enable/disable cores;
+   * see their doc comments for the knob bookkeeping.
    */
   _setEnabled(agent, on) {
-    const session = agent.session;
-    if (on) {
-      if (this._enabled.has(session.id)) return "agent-approval is already ON for this session";
-      const approval = this.ctx.approval;
-      const effectiveSandbox =
-        this._lastKnob(session, "sandbox/mode", "mode") ??
-        this.ctx.get("sandboxPolicy")?.defaultMode ??
-        BASE_MODE;
-      const effectiveApproval =
-        approval.overrideOf(session) ?? approval.config?.policy ?? "ask";
-      this._enabled.set(session.id, { prevSandbox: effectiveSandbox, prevApproval: effectiveApproval });
-      if (effectiveSandbox !== BASE_MODE) session.append("sandbox/mode", { mode: BASE_MODE });
-      approval.setPolicy(agent, "ask");
-      return "agent-approval ON: sandbox base is workspace-write; escalations are judged by the independent approval agent";
+    return on ? this._enable(agent, true) : this._disable(agent, true);
+  }
+
+  /**
+   * Whether the preset table currently knows our entry. The profile's
+   * `permission` row override registers it (install.mjs); without it we must
+   * NOT append `permission/preset` events — the session invariant rejects
+   * unknown preset names, and the menu simply will not show the mode.
+   */
+  _presetRegistered() {
+    const presets = this.ctx.get("permissionPresets");
+    if (presets === undefined) return false;
+    try {
+      return presets.names.includes(PRESET_NAME);
+    } catch (e) {
+      return false;
     }
+  }
+
+  /** The first NON-agent-approval table entry whose bundle matches, or the
+   *  still-matching previous selection; undefined when nothing matches. */
+  _presetForBundle(sandbox, approval) {
+    const presets = this.ctx.get("permissionPresets");
+    if (presets === undefined) return undefined;
+    try {
+      for (const name of presets.names) {
+        if (name === PRESET_NAME) continue;
+        const spec = presets.resolve(name);
+        if (spec.sandbox === sandbox && spec.approval === approval) return name;
+      }
+    } catch (e) {
+      /* table unreadable — caller falls back to no preset append */
+    }
+    return undefined;
+  }
+
+  /**
+   * Enable the judging mode and (optionally) record the preset selection so
+   * the permission menu reflects the mode. Shared-bundle rule: the LAST
+   * `permission/preset` event wins the derive tie against workspace-write, so
+   * the append is what makes the menu display "Agent 审批".
+   */
+  _enable(agent, appendPreset) {
+    const session = agent.session;
+    if (this._enabled.has(session.id)) return "agent-approval is already ON for this session";
+    this._enableCore(session, agent);
+    if (appendPreset && this._presetRegistered()) {
+      // Our own session/event listener fires on this append; _enableCore has
+      // already populated the map, so it no-ops there.
+      session.append("permission/preset", { preset: PRESET_NAME });
+    }
+    return "agent-approval ON: sandbox base is workspace-write; escalations are judged by the independent approval agent";
+  }
+
+  /**
+   * The pure bookkeeping half of enabling: capture the session's EFFECTIVE
+   * knob values (override ?? defaults — a session living under a `never`
+   * composition default must return to `never`, not to the fold's "no
+   * override" state) and the last recorded preset selection, then pin sandbox
+   * to workspace-write and approval policy to `ask` (the waterfall — and
+   * therefore our claimer — only runs under `ask`; under `never` the approval
+   * service short-circuits to `rejected` before any listener).
+   */
+  _enableCore(session, agent) {
+    const approval = this.ctx.approval;
+    const effectiveSandbox =
+      this._lastKnob(session, "sandbox/mode", "mode") ??
+      this.ctx.get("sandboxPolicy")?.defaultMode ??
+      BASE_MODE;
+    const effectiveApproval = approval.overrideOf(session) ?? approval.config?.policy ?? "ask";
+    this._enabled.set(session.id, {
+      prevSandbox: effectiveSandbox,
+      prevApproval: effectiveApproval,
+      prevPreset: this._lastKnob(session, "permission/preset", "preset"),
+    });
+    if (effectiveSandbox !== BASE_MODE) session.append("sandbox/mode", { mode: BASE_MODE });
+    approval.setPolicy(agent, "ask");
+  }
+
+  /**
+   * Disable the judging mode. With `restoreKnobs` (the chip/command path) the
+   * remembered values go back through the canonical setters and the menu's
+   * preset selection is corrected for the restored bundle — the shared-bundle
+   * tie rule would otherwise keep displaying "Agent 审批". Without it (the
+   * user switched to another preset in the menu) we touch nothing: the preset
+   * service writes its own knob events right after the selection event.
+   */
+  _disable(agent, restoreKnobs) {
+    const session = agent.session;
     const prev = this._enabled.get(session.id);
     if (prev === undefined) return "agent-approval is not ON for this session";
     this._enabled.delete(session.id);
+    if (!restoreKnobs) return "agent-approval OFF: previous permission knobs restored";
     if (
       typeof prev.prevSandbox === "string" &&
       prev.prevSandbox !== this._lastKnob(session, "sandbox/mode", "mode")
@@ -282,7 +406,41 @@ export class AgentApprovalService extends TypertRemoteService {
     if (typeof prev.prevApproval === "string") {
       this.ctx.approval.setPolicy(agent, prev.prevApproval);
     }
+    if (this._presetRegistered()) {
+      // Correct the menu selection for the restored bundle: prefer the
+      // previous selection when it still matches, else the first non-ours
+      // table entry with the same bundle (skip ours — appending it would
+      // re-select the mode we just turned off).
+      let name;
+      if (
+        typeof prev.prevPreset === "string" &&
+        prev.prevPreset !== PRESET_NAME &&
+        this._presetMatches(prev.prevPreset, prev.prevSandbox, prev.prevApproval)
+      ) {
+        name = prev.prevPreset;
+      } else {
+        name = this._presetForBundle(
+          typeof prev.prevSandbox === "string" ? prev.prevSandbox : BASE_MODE,
+          typeof prev.prevApproval === "string" ? prev.prevApproval : "ask",
+        );
+      }
+      if (name !== undefined) session.append("permission/preset", { preset: name });
+    }
     return "agent-approval OFF: previous permission knobs restored";
+  }
+
+  /** Whether one named table entry's bundle equals the given knob values. */
+  _presetMatches(name, sandbox, approval) {
+    const presets = this.ctx.get("permissionPresets");
+    if (presets === undefined || typeof sandbox !== "string" || typeof approval !== "string") {
+      return false;
+    }
+    try {
+      const spec = presets.resolve(name);
+      return spec.sandbox === sandbox && spec.approval === approval;
+    } catch (e) {
+      return false;
+    }
   }
 
   // ---- audit ----------------------------------------------------------------

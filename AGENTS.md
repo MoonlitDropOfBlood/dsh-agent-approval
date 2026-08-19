@@ -110,16 +110,42 @@ const run = await this.ctx.subagents.start("spawn", {
 - 两个 Slot：`settings.section`（id `agent-approval`，order 30，label `() => "Agent 审批"`）与 `conversation.input.left`（id `agent-approval-toggle`，order 15）。InputZone owner props 传 `props.session`（ConversationSnapshot），只读 `sessionId` 叶子字段。
 - client.js 里**不要用 `?.` / `??`**（与 token-stats 保持一致的保守写法），用 `&&`/`||`；不要 `import`，用 `require("react")`。
 
-### 7. 本地安装 = 复制包 + composition patch
+### 7. 权限菜单集成（`permission` 行覆盖 + `permission/preset` 事件联动）
+
+权限菜单（输入框 `/permission` 控件）的选项来自 **`dsh-permission-presets` 的 Config 预设表**；Web 端切换 = 执行 `/permission <preset>` 命令 → 追加 `permission/preset` 事件 + 旋钮事件。要让「Agent 审批」出现在菜单里：
+
+1. **install.mjs 在 profile patch 里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / danger-full-access / agent-approval）——DSH 升级若改了基础表要手动同步。
+2. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：chip/命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；chip 关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
+3. **事件联动**（`session/event` 监听 `permission/preset`）：
+   - 选中 `agent-approval` → `_enableCore`（此刻旋钮事件还没落，捕获的 prev 恰是切换前的值；我们写的旋钮值与预设服务随后要写的相同，它检查后跳过，无重复事件）。
+   - 选中其他预设 → 只删 bookkeeping，**不恢复旋钮**（预设服务马上写自己的旋钮，恢复会打架）。
+4. **跨重启存活**：`agent/created` 监听在（重）发布时折叠日志——`permission/preset` 折出 `agent-approval` 就重新启用。spawn 的审批员子会话不带 preset 事件（无 seed），不会递归重启用；fork 子会话 seed 里可能带父级的 preset 事件 → 会继承该模式（有意语义：模式跟随会话的工作；"later child switches win" 是官方允许的后来者覆盖）。
+5. **防御**：`_presetRegistered()` 先确认表里有 `agent-approval` 才追加 preset 事件——没装覆盖行时，追加会被会话不变量（unknown preset）直接抛错。
+6. chip 每 10s 轮询一次 enabled 状态（菜单/命令切换后 chip 也能跟上；InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询）。
+
+### 8. 本地安装 = 复制包 + composition patch
 
 流程（`scripts/install.mjs` 自动做）：
 1. 把插件包复制到 `<DSH_HOME>/profiles/web/node_modules/dsh-agent-approval/`。
-2. 在 `<DSH_HOME>/profiles/web/cordis.patch.yml` 里 **`- insert:`** 新增行（**不要**用普通 `- id:` 覆盖，新 id 会报 "entry not found"）：
+2. 在 `<DSH_HOME>/profiles/web/cordis.patch.yml` 里做两件事：**`- insert:`** 新增插件挂载行（**不要**对不存在的 id 用普通 `- id:`，会报 "entry not found"）；**`- id: permission`** 覆盖预设表行（该 id 已存在，覆盖合法）：
 
 ```yaml
 - insert:
   - id: agent-approval
     name: 'dsh-agent-approval'
+
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      read-only: { sandbox: read-only, approval: ask }
+      workspace-write: { sandbox: workspace-write, approval: ask }
+      danger-full-access: { sandbox: danger-full-access, approval: never }
+      agent-approval:
+        sandbox: workspace-write
+        approval: ask
+        name: Agent 审批
+        description: workspace-write base; an independent approval agent judges every escalation, risky ones are rejected.
 ```
 
 3. 重启 DSH。**必须重启**，Host 加载、typert 注册、client bundle 注入都在启动时发生。
@@ -132,11 +158,12 @@ node scripts/install.mjs # 安装到本机 DSH profile
 ```
 
 改插件后**必须重启 DSH 进程**才生效。验证：
-1. 设置 → 侧栏导航出现 **Agent 审批** 页；模型/超时可保存。
-2. 任一会话输入框左侧出现「🛡 审批」chip；点击开启（或 `/agent-approval on`）。
+1. 输入框 `/permission` 菜单出现第四项 **Agent 审批**；设置 → 侧栏导航出现 **Agent 审批** 页（模型/超时可保存）。
+2. 任一会话输入框左侧出现「🛡 审批」chip；点击开启（或 `/agent-approval on`、菜单选 Agent 审批——三条路径等价）。
 3. 开启后让工作区内命令触发一次提权重试（`sandbox_permissions`）：**不弹人工审批**，片刻后工具结果即为批准/拒绝；设置页出现一条审计记录（含风险等级与理由）。
-4. `/agent-approval off` 关闭：沙箱模式与审批策略恢复开启前的值；再次提权回到人工弹窗（ask）或原策略行为。
-5. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
+4. `/agent-approval off` 关闭：沙箱模式与审批策略恢复开启前的值，菜单同步切回对应预设；再次提权回到人工弹窗（ask）或原策略行为。
+5. 菜单切到 danger-full-access：chip 自动变 OFF（轮询 ≤10s）；菜单切回 Agent 审批：chip 变 ON，无需手动开启。
+6. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
 
 ## 发布
 
