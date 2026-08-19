@@ -22,7 +22,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
       - name: Install dependencies
         run: npm ci || npm install
@@ -74,7 +73,7 @@ jobs:
             - 新权限模式：workspace-write 基线 + 独立审批 Agent 裁决每一次沙箱提权。
             - 审批 Agent 独立会话、零工具、结构化裁决（approve/reject + 风险等级 + 理由），风险操作直接拒绝。
             - 超时/故障一律 fail-closed（按拒绝处理），绝不静默放行。
-            - 设置面板可配置审批模型与超时，并查看最近审批记录（审计）；会话输入框一键开关。
+            - 设置面板可配置审批模型与超时，并查看最近审批记录（审计）；会话经 /permission 菜单或 /agent-approval 命令开关。
 
             ### 📦 安装
             ```bash
@@ -85,4 +84,4 @@ jobs:
             ```
           files: artifacts/*
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
