@@ -10,8 +10,8 @@
 - 审批 Agent 在**独立会话**里运行：零父级上下文、全局工具全部空白（`toolFilter: {allow:[]}`）、审批策略被委派机制钉死为 `never`（不可能递归再审批），必须通过 `structured_output` 结构化工具给出裁决：`{ decision: approve|reject, riskLevel, rationale }`。
 - **风险即拒绝**：破坏性 / 不可逆 / 越界 / 理由与实际参数不符 → `reject`；只有"安全、可逆、与任务相符、理由诚实"才 `approve`。
 - **Fail-closed**：审批 Agent 启动失败、超时、结果不合法、请求被取消 → 一律按拒绝处理（`unavailable`/`cancelled`），绝不静默放行。
-- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或继承请求会话）、审批超时、查看已开启会话、**最近审批记录（审计）**（结论/风险/模型/耗时/理由，悬停看完整理由与工具参数）。
-- 会话**输入框左侧**「🛡 审批」开关 + `/agent-approval on|off` 命令为当前会话开关；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
+- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或 Harness 默认模型）、审批超时、查看已开启会话、**最近审批记录（审计）**（结论/风险/模型/耗时/理由，悬停看完整理由与工具参数）。
+- 输入框 `/permission` 菜单的「Agent 审批」预设 + `/agent-approval on|off` 命令为当前会话开关（**刻意没有 composer chip**——开关本就属于权限菜单，菜单旁边再放一个属冗余，已移除）；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
 
 ## 目录结构
 
@@ -19,7 +19,7 @@
 dsh-agent-approval/
 ├── package.json          # ESM 双面包：dsh.client: {platform:"web"} + exports(., /client, /typert, /package.json)
 ├── index.js              # Host 半：AgentApprovalService（TypertRemoteService 子类，类插件）
-├── client.js             # Client 半：window.__ModuleLoader__.load bundle（设置页 + 输入框开关 + Remote 调用）
+├── client.js             # Client 半：window.__ModuleLoader__.load bundle（设置页 + Remote 调用）
 ├── typert.host.js        # Typert Host manifest：agentApproval Remote 服务的 schema/调用描述
 ├── scripts/install.mjs   # 本地安装脚本：复制到 profile + 写入 patch
 ├── .github/workflows/release.yml  # 打 v* 标签时构建并发布 GitHub Release
@@ -95,6 +95,7 @@ const run = await this.ctx.subagents.start("spawn", {
 - **结果读取**：`run.result`（Promise，不 reject 业务失败）→ `result.structured`（合法裁决）+ `result.stopReason === "completed"`。两者任一不满足 → `unavailable`（fail-closed）。
 - **竞速**：`Promise.race([run.result, abortRace, this.ctx.timeout(timeoutMs)])`，`finally` 里 `run.dispose()`。超时/取消/基础设施故障分别映射 `unavailable`/`cancelled`。
 - **给审批员看的材料**：从会话日志按 `callId` 倒查 `tool/call` 事件的 `arguments` 原始 JSON（**精确命令**，不是转述），加上 `req.reason`（工具方的提权理由）和 workspace cwd。审批提示词明确 APPROVE 四条件与 REJECT 清单，并要求"存疑即拒"。
+- **开发流程口径**（端到端任务不被卡死的关键）：提权档位只有粗粒度两档，审批员**判实际操作而非档位名**——项目自带的安装/构建/部署脚本写其文档指定的安装路径（如工具自身 profile 目录）、覆盖自身已安装的文件（可从源码再生成）、读调试所需的工具自有配置/日志，都算"任务明确所需"可 approve；但**修改操作系统或其他应用的数据**仍一律 reject。
 
 ### 5. 审计记录
 
@@ -108,7 +109,7 @@ const run = await this.ctx.subagents.start("spawn", {
 - **Remote 命名空间必须自挂载**：`await ctx.remote.$mount(CLIENT_REMOTE)`（dsh-api-remotes 只挂载官方命名空间），然后 `ctx.get("remote.agentApproval")`。描述符与 `typert.host.js` 的 invocation 一一对应；浏览器没有 zod，用 passthrough schema（`{ parse: (v) => v }`）。
 - **返回值双层信封**：gateway 返回 `res.value` = Host 方法的 `{ ok, value }` 信封，client 的 `pick()` 做容忍双形状解包 + 双层错误上抛（token-stats 踩过"多包一层"的坑）。
 - **CSS 注入**用 `document.createElement("style")` + `ctx.effect(() => () => styleTag.remove())`；样式一律用 `--dsw-alias-*` 主题变量。
-- 两个 Slot：`settings.section`（id `agent-approval`，order 30，label `() => "Agent 审批"`）与 `conversation.input.left`（id `agent-approval-toggle`，order 15）。InputZone owner props 传 `props.session`（ConversationSnapshot），只读 `sessionId` 叶子字段。
+- 一个 Slot：`settings.section`（id `agent-approval`，order 30，label `() => "Agent 审批"`）。曾有过 `conversation.input.left` 的「🛡 审批」chip（id `agent-approval-toggle`，order 15，InputZone owner props 传 `props.session`，只读 `sessionId` 叶子字段），已移除——开关本就属于 /permission 菜单，菜单旁边再放一个开关是冗余。
 - client.js 里**不要用 `?.` / `??`**（与 token-stats 保持一致的保守写法），用 `&&`/`||`；不要 `import`，用 `require("react")`。
 
 ### 7. 权限菜单集成（`permission` 行覆盖 + `permission/preset` 事件联动）
@@ -117,13 +118,13 @@ const run = await this.ctx.subagents.start("spawn", {
 
 1. **install.mjs 在 profile patch 里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / **agent-approval** / danger-full-access）——**声明顺序即菜单顺序**，agent-approval 排在 Full access 上面；DSH 升级若改了基础表要手动同步。管理块**无条件剥离重追加**（幂等），改顺序后重跑安装脚本即可自愈。
 2. **菜单图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`**（菜单行 + 触发按钮共用；源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**。install.mjs 的 `patchPermissionGlyph()` 直接补丁该编译产物：往 `const permissionGlyphs = {` 后插入 `agent-approval` 条目（描边盾牌 + 填充 AI 星形，与出厂三个图标同风格同 viewBox）。幂等；**DSH 升级会重装原版 bundle，重跑安装脚本即可再补丁**；找不到锚点时降级为警告（菜单只是没图标，功能不受影响）。
-3. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：chip/命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；chip 关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
+3. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；命令关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
 4. **事件联动**（`session/event` 监听 `permission/preset`）：
    - 选中 `agent-approval` → `_enableCore`（此刻旋钮事件还没落，捕获的 prev 恰是切换前的值；我们写的旋钮值与预设服务随后要写的相同，它检查后跳过，无重复事件）。
    - 选中其他预设 → 只删 bookkeeping，**不恢复旋钮**（预设服务马上写自己的旋钮，恢复会打架）。
 5. **跨重启存活**：`agent/created` 监听在（重）发布时折叠日志——`permission/preset` 折出 `agent-approval` 就重新启用。spawn 的审批员子会话不带 preset 事件（无 seed），不会递归重启用；fork 子会话 seed 里可能带父级的 preset 事件 → 会继承该模式（有意语义：模式跟随会话的工作；"later child switches win" 是官方允许的后来者覆盖）。
 6. **防御**：`_presetRegistered()` 先确认表里有 `agent-approval` 才追加 preset 事件——没装覆盖行时，追加会被会话不变量（unknown preset）直接抛错。
-7. chip 每 10s 轮询一次 enabled 状态（菜单/命令切换后 chip 也能跟上；InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询）。
+7. （已随 composer chip 的移除而作废）曾有的 chip 每 10s 轮询一次 enabled 状态；若未来重加 chip，注意 InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询。
 
 ### 8. 本地安装 = 复制包 + composition patch
 
@@ -161,10 +162,10 @@ node scripts/install.mjs # 安装到本机 DSH profile
 
 改插件后**必须重启 DSH 进程**才生效。验证：
 1. 输入框 `/permission` 菜单出现第四项 **Agent 审批**；设置 → 侧栏导航出现 **Agent 审批** 页（模型/超时可保存）。
-2. 任一会话输入框左侧出现「🛡 审批」chip；点击开启（或 `/agent-approval on`、菜单选 Agent 审批——三条路径等价）。
+2. 用 `/agent-approval on` 或菜单选 **Agent 审批** 为会话开启（两条路径等价）；输入框左侧**不再有**「🛡 审批」chip。
 3. 开启后让工作区内命令触发一次提权重试（`sandbox_permissions`）：**不弹人工审批**，片刻后工具结果即为批准/拒绝；设置页出现一条审计记录（含风险等级与理由）。
 4. `/agent-approval off` 关闭：沙箱模式与审批策略恢复开启前的值，菜单同步切回对应预设；再次提权回到人工弹窗（ask）或原策略行为。
-5. 菜单切到 danger-full-access：chip 自动变 OFF（轮询 ≤10s）；菜单切回 Agent 审批：chip 变 ON，无需手动开启。
+5. 菜单切到 danger-full-access：模式自动关闭（`permission/preset` 事件联动，立即生效）；菜单切回 Agent 审批：模式自动开启，无需手动执行命令。
 6. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
 
 ## 发布
@@ -177,5 +178,5 @@ node scripts/install.mjs # 安装到本机 DSH profile
 - 监听器**绝不能抛异常**：瀑布层的兜底会把异常归一为 `unavailable`，但要自己 catch 并记录，否则审计里看不到原因。
 - 声称（claim）的范围是"该会话的**所有** approval 请求"——不止 pwsh/bash 提权，也包括任何 `tools/pre-execute` 产生的人工 ask。这是有意语义（"帮我审批"），提示词写成通用审批口径。
 - `approval.setPolicy` 会在模型上下文里注入 "changed by the user" 通知——用户确实主动开了开关，语义可接受；不要绕开它手写 `approval/policy` 事件（会丢失通知）。
-- 审批模型未配置时**继承请求会话的路由**（`resolveChildAgentOptions` 语义）；配置后走 `agentOptions` 精确覆盖。
+- 审批模型未配置时使用 **Harness 默认路由**（`agentDefaultModel.currentSelection()`；该可选服务缺席或解析为空时才退化为继承请求会话路由）；配置后走 `agentOptions` 精确覆盖。**刻意不跟随请求会话的模型**——审批口径必须稳定可预期，不随各会话的模型切换而漂移。
 - 审计记录是**进程内存态**（重启清空）；DSH 的权威审计仍在会话日志的 `approval/asked` + `approval/decided` 事件对（本插件不破坏该配对，只在瀑布层给结论）。

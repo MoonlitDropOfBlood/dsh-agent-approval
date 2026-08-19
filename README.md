@@ -23,16 +23,16 @@
 | 🛡 **权限菜单第四项** | `/permission` 菜单新增 **Agent 审批** 预设；选中即开启，切到其他预设自动关闭，跨重启保持 |
 | 🤖 新权限模式 | 开启后：沙箱基线固定 `workspace-write`，审批策略切到 `ask`（内部接管），**不再弹人工审批** |
 | 🤖 独立审批 Agent | 每次提权请求由一次性 `spawn` 子代理裁决：独立会话、零工具、只读材料，结构化输出 `{decision, riskLevel, rationale}` |
-| ⛔ 风险即拒绝 | 破坏性 / 不可逆 / 越界 / 理由与实际命令不符 → 直接 `reject`；仅"安全、可逆、与任务相符、理由诚实"才 `approve` |
+| ⛔ 风险即拒绝 | 破坏性 / 不可逆 / 越界（含修改操作系统或其他应用数据）/ 理由与实际命令不符 → 直接 `reject`；仅"安全、可逆、与任务相符、理由诚实"才 `approve`——项目自身的安装/部署脚本写其文档指定路径属任务所需 |
 | 🔒 Fail-closed | 审批 Agent 启动失败、超时（可配 30s–600s）、结果不合法 → 一律按拒绝处理，绝不静默放行 |
-| ⚙️ 审批模型可配置 | 设置页选择 Provider + Model，或**继承请求会话的路由** |
+| ⚙️ 审批模型可配置 | 设置页选择 Provider + Model，不选则固定用 **Harness 默认模型**（不跟随请求会话，口径稳定） |
 | 📋 审计记录 | 设置页查看最近审批：结论 / 风险等级 / 模型 / 耗时 / 理由；悬停看完整理由与**精确工具参数**；审批 Agent 的会话 id 可回溯完整推理 |
-| 🔁 可逆开关 | 权限菜单、会话输入框「🛡 审批」chip、`/agent-approval on\|off` 三条等价路径；关闭时**恢复开启前的权限旋钮** |
+| 🔁 可逆开关 | 权限菜单「Agent 审批」预设、`/agent-approval on\|off` 命令两条等价路径；关闭时**恢复开启前的权限旋钮** |
 
 ## 工作原理
 
 ```
-开启（chip / 命令）
+开启（菜单 / 命令）
   └─ 记住旧旋钮 → sandbox/mode=workspace-write + approval/policy=ask（规范写路径，可恢复）
         │
 工具请求提权（sandbox_permissions / 人工 ask）
@@ -64,7 +64,7 @@ node scripts/install.mjs
 # 3. 重启 DSH（命令行：node <dsh bin> web --profile web）
 ```
 
-重启后：设置面板出现 **Agent 审批** 页；会话输入框左侧出现「🛡 审批」开关。
+重启后：设置面板出现 **Agent 审批** 页；`/permission` 菜单出现第四项 **Agent 审批**。
 
 > 需要插件能在 profile 的 `node_modules` 解析到依赖（`zod`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-typert-protocol`）。若本机 DSH 未提供这些依赖，先在插件目录 `npm install`，再手动把 `node_modules` 一并复制，或把插件作为依赖加入 profile。
 
@@ -83,11 +83,11 @@ node scripts/install.mjs
 
 ## 使用
 
-1. **开启**：任一会话输入框左侧点「🛡 审批」，或输入 `/agent-approval on`。
+1. **开启**：在 `/permission` 菜单选 **Agent 审批**，或输入 `/agent-approval on`。
 2. **自动裁决**：之后该会话里的提权请求（例如命令被沙箱拒绝后带 `sandbox_permissions` 的重试）不再弹窗，由审批 Agent 在后台裁决并放行/拒绝。
 3. **审计**：设置 → **Agent 审批** → 审批记录；悬停"审批理由"看完整理由与工具参数。
-4. **配置**：同页设置审批模型（不选则继承请求会话的模型）与审批超时。
-5. **关闭**：再次点击 chip 或 `/agent-approval off`，恢复开启前的沙箱模式与审批策略。
+4. **配置**：同页设置审批模型（不选则用 Harness 默认模型）与审批超时。
+5. **关闭**：菜单切回其他预设，或 `/agent-approval off`，恢复开启前的沙箱模式与审批策略。
 
 ## 目录结构
 

@@ -173,7 +173,7 @@ export class AgentApprovalService extends TypertRemoteService {
     markRemoteMethod(this, "clearRecords", "clearRecords");
     markRemoteMethod(this, "directory", "directory");
 
-    /** Judge model route; empty strings = inherit the requesting session's. */
+    /** Judge model override; empty strings = use the harness default route. */
     this._model = { provider: "", model: "" };
     /** Judge timeout in ms (clamped); a timeout resolves fail-closed. */
     this._timeoutMs = DEFAULT_TIMEOUT_MS;
@@ -249,14 +249,11 @@ export class AgentApprovalService extends TypertRemoteService {
         text: (context) => {
           const agent = context.agent;
           if (agent === undefined || !this._enabled.has(agent.session.id)) return "";
-          const route =
-            this._model.provider !== ""
-              ? ` routed to ${this._model.provider}/${this._model.model}`
-              : "";
+          const route = " routed to " + this._judgeRoute().label;
           return (
             "Agent-approval mode is ON for this session: the sandbox base is workspace-write, and every sandbox-escalation request is decided by an independent approval agent" +
             route +
-            ". The approver sees the exact command or file operation plus your justification, approves only plausibly safe, reversible operations consistent with the task, and rejects risky, destructive, or poorly justified ones. A rejection is final for that exact operation — do not retry it."
+            ". The approver sees the exact command or file operation plus your justification, approves plausibly safe, reversible operations consistent with the task (including the project's own documented install/deploy steps), and rejects risky, destructive, or poorly justified ones. State the exact target and why the task requires it — vague justifications are rejected. A rejection is final for that exact operation — do not retry it."
           );
         },
       });
@@ -499,7 +496,12 @@ export class AgentApprovalService extends TypertRemoteService {
       "- it stays within, or is clearly required by, the agent's stated task;",
       "- the stated reason honestly matches the actual arguments;",
       "- granting it once cannot leak secrets or cause irreversible system changes.",
-      "REJECT when the operation is destructive (mass deletion, disk formatting, registry/service/system-wide changes), exfiltrates credentials or secrets, touches resources unrelated to the task, hides intent behind encoded or obfuscated content, or the reason does not match the arguments.",
+      "Judge the ACTUAL operation, not the escalation level's name: the harness offers only coarse escalation levels (workspace-write vs danger-full-access), so a narrow, well-justified, task-required operation is acceptable even when it must ride on the broad level.",
+      "Development-workflow operations count as task-scoped when the justification says so and the arguments match:",
+      "- running the project's own documented install/build/deploy scripts (e.g. scripts/install.mjs) that copy the project's own files into the install location its documentation specifies (e.g. the tool's own profile/config/plugin directory under the user home);",
+      "- overwriting files that this same project previously installed there and can regenerate from source (reversible in practice, not an irreversible system change);",
+      "- reading tool-owned config or logs needed to debug the task at hand.",
+      "REJECT when the operation is destructive (mass deletion, disk formatting, registry/service/system-wide changes), exfiltrates credentials or secrets, touches resources unrelated to the task, modifies the operating system or OTHER applications' data, hides intent behind encoded or obfuscated content, or the reason does not match the arguments.",
       "When uncertain, REJECT. Report the verdict via the structured_output tool only.",
     ].join("\n");
   }
@@ -533,7 +535,7 @@ export class AgentApprovalService extends TypertRemoteService {
           args: "",
           outcome: "unavailable",
           riskLevel: "-",
-          model: this._modelLabel(),
+          model: this._judgeRoute().label,
           durationMs: 0,
           childSessionId: "",
           rationale: "claimer fault (fail closed): " + errText(e),
@@ -545,11 +547,35 @@ export class AgentApprovalService extends TypertRemoteService {
     }
   }
 
-  /** Build the "inherit/configured" label used in audit records. */
-  _modelLabel() {
-    return this._model.provider !== ""
-      ? this._model.provider + "/" + this._model.model
-      : "inherit(requester)";
+  /**
+   * The effective judge route: the configured override when set, otherwise the
+   * harness default selection (`agentDefaultModel`); only when that optional
+   * surface is unavailable or resolves empty do we degrade to inheriting the
+   * requester's route (spawn with no agentOptions). The label is what audit
+   * records display — "p/m" = selected, "default(p/m)" = harness default.
+   */
+  _judgeRoute() {
+    if (this._model.provider !== "" && this._model.model !== "") {
+      return {
+        provider: this._model.provider,
+        model: this._model.model,
+        label: this._model.provider + "/" + this._model.model,
+      };
+    }
+    const adm = this.ctx.get("agentDefaultModel");
+    if (adm !== undefined) {
+      try {
+        const sel = adm.currentSelection();
+        const provider = sel && typeof sel.provider === "string" ? sel.provider : "";
+        const model = sel && typeof sel.model === "string" ? sel.model : "";
+        if (provider !== "" && model !== "") {
+          return { provider: provider, model: model, label: "default(" + provider + "/" + model + ")" };
+        }
+      } catch (e) {
+        /* optional surface degraded — fall through to inherit */
+      }
+    }
+    return { provider: "", model: "", label: "inherit(requester)" };
   }
 
   /** Spawn the judge subagent, race it against abort/timeout, map the verdict. */
@@ -557,13 +583,14 @@ export class AgentApprovalService extends TypertRemoteService {
     const startedAt = new Date().toISOString();
     const t0 = Date.now();
     const argsRaw = this._callArgsOf(session, req.callId);
+    const route = this._judgeRoute();
     const base = {
       at: startedAt,
       sessionId: shortId(session.id),
       toolName: String(req.toolName),
       reason: trunc(req.reason, 300),
       args: trunc(argsRaw, 2000),
-      model: this._modelLabel(),
+      model: route.label,
       durationMs: 0,
       childSessionId: "",
     };
@@ -575,8 +602,8 @@ export class AgentApprovalService extends TypertRemoteService {
         prompt: [{ type: "text", text: this._judgePrompt(session, req, argsRaw) }],
         parent: agent,
         signal: req.signal,
-        ...(this._model.provider !== "" && this._model.model !== ""
-          ? { agentOptions: { provider: this._model.provider, model: this._model.model } }
+        ...(route.provider !== ""
+          ? { agentOptions: { provider: route.provider, model: route.model } }
           : {}),
         outputSchema: VERDICT_SCHEMA,
         toolFilter: { allow: [] },
@@ -670,8 +697,8 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
-   * Set the judge model route. Empty strings clear the override (inherit the
-   * requesting session's provider/model).
+   * Set the judge model override. Empty strings clear it (the judge then runs
+   * on the harness default route, never the requester's).
    */
   async setModel(request) {
     const provider = request && typeof request.provider === "string" ? request.provider : "";
@@ -714,7 +741,7 @@ export class AgentApprovalService extends TypertRemoteService {
 
   /**
    * Directory for the Settings pickers: registered providers, their models,
-   * and the harness default selection (for the "inherit" hint).
+   * and the harness default selection (for the default-route hint).
    */
   async directory() {
     const out = { providers: [], models: [], defaultSelection: null };

@@ -4,14 +4,16 @@
  * Rendered by the DSH web shell via `window.__ModuleLoader__.load`. Adds:
  *
  *   1. A "Agent 审批" page in the Settings panel (`settings.section`):
- *      - approval model picker (provider + model, or inherit),
+ *      - approval model picker (provider + model, or the harness default),
  *      - judge timeout setting (fail-closed),
  *      - the list of sessions with the mode enabled,
  *      - the latest approval audit records (verdict, risk, model, duration,
  *        rationale; hover for the full rationale + tool arguments).
  *
- *   2. A "🛡 审批" toggle chip in the composer tool row
- *      (`conversation.input.left`) to switch the mode for the current session.
+ * Session-level on/off lives in the /permission menu (the "Agent 审批"
+ * preset, registered by scripts/install.mjs's profile patch) and the
+ * /agent-approval command — deliberately NO composer chip: a second toggle
+ * beside the permission menu it belongs to was redundant.
  *
  * Host communication goes through the `agentApproval` Remote namespace
  * (`ctx.remote.agentApproval.*`), published by the Host half in `index.js`.
@@ -45,8 +47,6 @@ window.__ModuleLoader__.load({
 .aapr-cell{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:normal}
 .aapr-ok{color:var(--dsw-alias-state-success-primary);white-space:nowrap}
 .aapr-no{color:var(--dsw-alias-state-error-primary);white-space:nowrap}
-.aapr-toggle{display:inline-flex;align-items:center;gap:4px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);padding:2px 10px;font-size:11px;cursor:pointer;white-space:nowrap}
-.aapr-toggle-on{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
 `;
 
     // ---- Client Remote contribution -------------------------------------------
@@ -190,64 +190,11 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // ---- composer toggle (conversation.input.left) --------------------------
-
-      function ApprovalToggle(props) {
-        const sessionId = props && props.session ? props.session.sessionId : undefined;
-        const state = React.useState(false);
-        const on = state[0];
-        const setOn = state[1];
-        const readyState = React.useState(false);
-        const setReady = readyState[1];
-
-        React.useEffect(() => {
-          if (sessionId === undefined) return undefined;
-          let alive = true;
-          const read = () => {
-            remote
-              .getState()
-              .then((res) => {
-                const s = pick(res);
-                if (!alive || !s) return;
-                setOn(s.enabledSessions.indexOf(String(sessionId)) !== -1);
-                setReady(true);
-              })
-              .catch(() => {});
-          };
-          read();
-          // The mode can also be switched from the permission menu (the
-          // /permission control) and the /agent-approval command — poll so
-          // the chip stays truthful without a remount.
-          const t = setInterval(read, 10000);
-          return () => {
-            alive = false;
-            clearInterval(t);
-          };
-        }, [sessionId]);
-
-        if (sessionId === undefined) return null;
-
-        const toggle = () => {
-          remote
-            .toggle({ sessionId: String(sessionId), on: !on })
-            .then(() => {
-              setOn(!on);
-            })
-            .catch(() => {});
-        };
-
-        return h(
-          "button",
-          {
-            className: "aapr-toggle" + (on ? " aapr-toggle-on" : ""),
-            onClick: toggle,
-            title: on
-              ? "Agent 审批已开启：workspace-write 基线，提权请求由独立审批 Agent 裁决。点击关闭并恢复原权限。"
-              : "开启 Agent 审批：以 workspace-write 为基线权限，提权请求交由独立审批 Agent 裁决，有风险则拒绝。",
-          },
-          readyState[0] ? (on ? "🛡 审批 ON" : "🛡 审批 OFF") : "🛡 审批 …",
-        );
-      }
+      // NOTE: no composer chip anymore. The mode lives in the /permission
+      // menu as the "Agent 审批" preset (same place users switch Read-only /
+      // Workspace Write / Full access); a second toggle beside that menu was
+      // redundant. Enabling surfaces: the menu, the /agent-approval command,
+      // and this Settings page (whose session chips can also disable one).
 
       // ---- settings page (settings.section) -----------------------------------
 
@@ -330,19 +277,19 @@ window.__ModuleLoader__.load({
             .catch(() => {});
         };
 
-        const providerOptions = [{ id: "", name: "继承（使用请求会话的模型）" }].concat(
+        const providerOptions = [{ id: "", name: "默认（Harness 默认模型）" }].concat(
           dir ? dir.providers : [],
         );
-        const modelOptions = [{ provider: "", id: "", name: "继承（使用请求会话的模型）" }].concat(
+        const modelOptions = [{ provider: "", id: "", name: "默认（Harness 默认模型）" }].concat(
           dir && dir.models ? dir.models.filter((m) => m.provider === provider) : [],
         );
         const defaultHint =
           dir && dir.defaultSelection
-            ? "未配置时继承请求会话的路由；当前 Harness 默认模型：" +
+            ? "未配置时使用 Harness 默认模型；当前默认路由：" +
               dir.defaultSelection.provider +
               " / " +
               dir.defaultSelection.model
-            : "未配置时继承请求会话的模型路由";
+            : "未配置时使用 Harness 默认模型路由";
 
         return h(
           "div",
@@ -356,7 +303,7 @@ window.__ModuleLoader__.load({
               { className: "aapr-muted" },
               "一种新的权限模式：以 workspace-write 为基线沙箱；当工具请求提权（更宽的沙箱）时，由一个独立的审批 Agent 评估风险——安全、可逆、与任务相符的操作自动批准，破坏性、不可逆、越界或理由不符的操作直接拒绝。",
               h("br", null),
-              "在会话输入框左侧的「🛡 审批」开关或命令 /agent-approval on|off 为会话开启；审批记录见下方审计。",
+              "在输入框 /permission 菜单选择「Agent 审批」预设，或执行命令 /agent-approval on|off 为会话开启；审批记录见下方审计。",
             ),
           ),
           h(
@@ -516,14 +463,6 @@ window.__ModuleLoader__.load({
         ctx.slots.register(
           { name: "settings.section", id: "agent-approval", order: 30, label: () => "Agent 审批" },
           AgentApprovalSection,
-        ),
-      );
-
-      // Composer tool-row entry: a small toggle for the current session.
-      ctx.slots.inject("conversation.input.left", () =>
-        ctx.slots.register(
-          { name: "conversation.input.left", id: "agent-approval-toggle", order: 15, label: () => "Agent 审批" },
-          ApprovalToggle,
         ),
       );
     }
