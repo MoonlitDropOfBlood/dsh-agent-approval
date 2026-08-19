@@ -70,7 +70,8 @@ function insertBlock() {
  * in the permission-preset table (the composer /permission menu). A patch
  * REPLACES the targeted row's whole config rather than merging, so the full
  * table is restated here — keep it in sync with the dsh-base bundle's row
- * when upgrading DSH.
+ * when upgrading DSH. Declaration order IS menu order: agent-approval sits
+ * between workspace-write and danger-full-access (above Full access).
  */
 function permissionOverrideBlock() {
   return (
@@ -87,20 +88,39 @@ function permissionOverrideBlock() {
     "      workspace-write:\n" +
     "        sandbox: workspace-write\n" +
     "        approval: ask\n" +
-    "      danger-full-access:\n" +
-    "        sandbox: danger-full-access\n" +
-    "        approval: never\n" +
     "      agent-approval:\n" +
     "        sandbox: workspace-write\n" +
     "        approval: ask\n" +
     "        name: Agent 审批\n" +
-    "        description: workspace-write base; an independent approval agent judges every escalation, risky ones are rejected.\n"
+    "        description: workspace-write base; an independent approval agent judges every escalation, risky ones are rejected.\n" +
+    "      danger-full-access:\n" +
+    "        sandbox: danger-full-access\n" +
+    "        approval: never\n"
   );
 }
 
-/** True when the permission override block is already present. */
-function hasPermissionOverride(text) {
-  return text.includes("presets:") && text.includes("\n      agent-approval:");
+/** First line of the managed permission-override block (its identity marker). */
+const PERMISSION_BLOCK_MARKER = "# --- dsh-agent-approval: register the Agent 审批 preset in the permission menu ---";
+
+/**
+ * Remove any previously managed permission-override block (from the marker
+ * line up to the next `# ---` section header or EOF), so a re-install can
+ * replace it wholesale — that is how table reordering self-heals without
+ * hand-editing the profile patch.
+ */
+function stripManagedPermissionBlock(text) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((l) => l === PERMISSION_BLOCK_MARKER);
+  if (start === -1) return text;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i].startsWith("# --- ") && lines[i] !== PERMISSION_BLOCK_MARKER) {
+      end = i;
+      break;
+    }
+  }
+  const kept = lines.slice(0, start).concat(lines.slice(end));
+  return kept.join("\n").replace(/\n{3,}$/, "\n");
 }
 
 /** True when the patch body is effectively empty (a bare `[]` or blank). */
@@ -137,16 +157,63 @@ async function ensurePatch() {
   } else {
     log("patch", "plugin row already present, skipping");
   }
-  if (!hasPermissionOverride(text)) {
-    const trimmed = text.trimEnd();
-    text = trimmed.length === 0 ? permissionOverrideBlock() : trimmed + "\n\n" + permissionOverrideBlock();
-    log("patch", `added permission preset override to ${PATCH_FILE}`);
+  // Always strip any previously managed block and append the current one —
+  // idempotent by construction, and table reorders self-heal without
+  // hand-editing the profile patch.
+  {
+    const stripped = stripManagedPermissionBlock(text).trimEnd();
+    text = stripped.length === 0 ? permissionOverrideBlock() : stripped + "\n\n" + permissionOverrideBlock();
+    log("patch", `rewrote permission preset override in ${PATCH_FILE}`);
     changed = true;
-  } else {
-    log("patch", "permission preset override already present, skipping");
   }
   if (changed) await writeFile(PATCH_FILE, text, "utf8");
   return changed;
+}
+
+// ---- permission-menu glyph patch ---------------------------------------------
+
+/**
+ * The shipped ui-conversation bundle hardcodes the permission glyphs (menu
+ * rows + the composer trigger) keyed by the three stock preset values —
+ * "host-configured names outside the design set get none" (source comment).
+ * There is no public registration seam, so this patches the compiled map in
+ * place with an `agent-approval` entry: the same stroked shield as the stock
+ * presets with a filled AI-sparkle inside. Idempotent; a DSH upgrade
+ * reinstalls the pristine bundle, and re-running the installer re-patches it.
+ */
+const GLYPH_TARGET = join(
+  DSH_HOME,
+  "profiles",
+  "node_modules",
+  "@deepseek-ai",
+  "dsh-client-ui-conversation",
+  "lib",
+  "client.js",
+);
+const GLYPH_ANCHOR = "const permissionGlyphs = {";
+const GLYPH_MARKER = '"agent-approval": (0, react_jsx_runtime.jsx)';
+const GLYPH_ENTRY =
+  '"agent-approval": (0, react_jsx_runtime.jsx)("svg", { width: "16", height: "16", viewBox: "0 0 16 16", fill: "none", "aria-hidden": true, children: [(0, react_jsx_runtime.jsx)("path", { d: "M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z", stroke: "currentColor", strokeWidth: "1.31831", strokeLinejoin: "round" }), (0, react_jsx_runtime.jsx)("path", { d: "M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z", fill: "currentColor" })] }),\n';
+
+async function patchPermissionGlyph() {
+  if (!existsSync(GLYPH_TARGET)) {
+    log("warn", `glyph target not found, skipping: ${GLYPH_TARGET}`);
+    return;
+  }
+  const text = await readFile(GLYPH_TARGET, "utf8");
+  if (text.includes(GLYPH_MARKER)) {
+    log("glyph", "agent-approval glyph already present, skipping");
+    return;
+  }
+  const at = text.indexOf(GLYPH_ANCHOR);
+  if (at === -1) {
+    log("warn", "permissionGlyphs map not found in the shipped bundle — DSH version changed? Skipping glyph patch.");
+    return;
+  }
+  const insertAt = at + GLYPH_ANCHOR.length;
+  const next = text.slice(0, insertAt) + "\n" + GLYPH_ENTRY + text.slice(insertAt);
+  await writeFile(GLYPH_TARGET, next, "utf8");
+  log("glyph", `patched agent-approval glyph into ${GLYPH_TARGET}`);
 }
 
 /**
@@ -187,6 +254,7 @@ async function main() {
   await ensureProfile();
   await copyPackage();
   await ensurePatch();
+  await patchPermissionGlyph();
   await checkDeps();
   log("done", `restart DSH (node <dsh bin> web --profile ${PROFILE}) for the plugin to take effect.`);
 }

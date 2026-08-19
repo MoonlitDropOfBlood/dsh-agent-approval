@@ -23,6 +23,10 @@ window.__ModuleLoader__.load({
     var exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
     const React = require("react");
+    // Official DSH design-system atoms (Button etc.). The Button variants are
+    // backed by the `--dsw-alias-button-*` token family, so light/dark themes
+    // are automatic (same pattern as dsh-memory-manager).
+    const ui = require("@deepseek-ai/dsh-client-ui-primitives");
 
     // ---- CSS (package-owned, uses DSH design tokens) -------------------------
     const CSS = `
@@ -32,8 +36,6 @@ window.__ModuleLoader__.load({
 .aapr-muted{color:var(--dsw-alias-label-secondary);line-height:1.5}
 .aapr-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .aapr-select,.aapr-input{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:4px 8px;font-size:12px;max-width:340px}
-.aapr-btn{background:var(--dsw-alias-brand-primary);color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer}
-.aapr-btn2{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer}
 .aapr-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:2px 10px;background:var(--dsw-alias-bg-layer-2);font-family:monospace}
 .aapr-chip button{background:none;border:none;color:var(--dsw-alias-state-error-primary);cursor:pointer;font-size:12px;padding:0 2px}
 .aapr-wrap{overflow-x:auto}
@@ -400,7 +402,7 @@ window.__ModuleLoader__.load({
                   ),
                 ),
               ),
-              h("button", { className: "aapr-btn", onClick: saveModel }, "保存"),
+              h(ui.Button, { variant: "primary", size: "sm", onClick: saveModel }, "保存"),
             ),
             h("div", { className: "aapr-muted" }, defaultHint),
           ),
@@ -418,7 +420,7 @@ window.__ModuleLoader__.load({
                 onChange: (e) => setTimeoutDraft(e.target.value),
               }),
               h("span", { className: "aapr-muted" }, "毫秒（30000–600000，超时按拒绝处理，fail-closed）"),
-              h("button", { className: "aapr-btn", onClick: saveTimeout }, "保存"),
+              h(ui.Button, { variant: "primary", size: "sm", onClick: saveTimeout }, "保存"),
             ),
           ),
           h(
@@ -449,8 +451,8 @@ window.__ModuleLoader__.load({
             h(
               "div",
               { className: "aapr-row" },
-              h("button", { className: "aapr-btn2", onClick: refresh }, "刷新"),
-              h("button", { className: "aapr-btn2", onClick: clearRecords }, "清空记录"),
+              h(ui.Button, { variant: "ghost", size: "sm", onClick: refresh }, "刷新"),
+              h(ui.Button, { variant: "ghost", size: "sm", onClick: clearRecords }, "清空记录"),
               note !== "" ? h("span", { className: "aapr-muted" }, note) : null,
             ),
             h(
