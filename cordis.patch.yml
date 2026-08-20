@@ -1,0 +1,29 @@
+# dsh bundle patch: inserts this plugin into a profile's layer stack and
+# registers the Agent 审批 preset in the permission menu.
+- insert:
+  - id: agent-approval
+    name: 'dsh-agent-approval'
+
+# --- dsh-agent-approval: register the Agent 审批 preset in the permission menu ---
+# Restates the full presets table because a patch REPLACES the `permission`
+# row's whole config; re-sync with dsh-base when upgrading DSH. Declaration
+# order IS menu order: agent-approval sits between workspace-write and
+# danger-full-access (above Full access).
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      agent-approval:
+        sandbox: workspace-write
+        approval: ask
+        name: Agent 审批
+        description: workspace-write base; an independent approval agent judges every escalation, risky ones are rejected.
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never

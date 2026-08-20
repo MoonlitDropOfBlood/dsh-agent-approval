@@ -75,13 +75,12 @@ jobs:
             - 超时/故障一律 fail-closed（按拒绝处理），绝不静默放行。
             - 设置面板可配置审批模型与超时，并查看最近审批记录（审计）；会话经 /permission 菜单或 /agent-approval 命令开关。
 
-            ### 📦 安装
+            ### 📦 安装（标准 DSH bundle）
             ```bash
-            git clone <your-repo>.git
-            cd dsh-agent-approval
-            node scripts/install.mjs
+            dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.2.0/dsh-agent-approval-1.2.0.tgz
             # 重启 DSH 后，设置面板出现「Agent 审批」页
             ```
+            > 可选：菜单图标补丁 `npm run patch:glyph`（详见 README；不跑只是菜单项没图标，功能不受影响）。
           files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}

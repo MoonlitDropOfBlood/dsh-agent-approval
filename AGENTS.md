@@ -21,7 +21,8 @@ dsh-agent-approval/
 ├── index.js              # Host 半：AgentApprovalService（TypertRemoteService 子类，类插件）
 ├── client.js             # Client 半：window.__ModuleLoader__.load bundle（设置页 + Remote 调用）
 ├── typert.host.js        # Typert Host manifest：agentApproval Remote 服务的 schema/调用描述
-├── scripts/install.mjs   # 本地安装脚本：复制到 profile + 写入 patch
+├── cordis.patch.yml      # dsh bundle patch（挂载行 + permission 预设表覆盖）
+├── scripts/patch-glyph.mjs # 可选：权限菜单图标补丁（标准安装不自动执行）
 ├── .github/workflows/release.yml  # 打 v* 标签时构建并发布 GitHub Release
 ├── AGENTS.md             # 本文件
 ├── README.md
@@ -117,8 +118,8 @@ const run = await this.ctx.subagents.start("spawn", {
 
 权限菜单（输入框 `/permission` 控件）的选项来自 **`dsh-permission-presets` 的 Config 预设表**；Web 端切换 = 执行 `/permission <preset>` 命令 → 追加 `permission/preset` 事件 + 旋钮事件。要让「Agent 审批」出现在菜单里：
 
-1. **install.mjs 在 profile patch 里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / **agent-approval** / danger-full-access）——**声明顺序即菜单顺序**，agent-approval 排在 Full access 上面；DSH 升级若改了基础表要手动同步。管理块**无条件剥离重追加**（幂等），改顺序后重跑安装脚本即可自愈。
-2. **菜单图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`**（菜单行 + 触发按钮共用；源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**。install.mjs 的 `patchPermissionGlyph()` 直接补丁该编译产物：往 `const permissionGlyphs = {` 后插入 `agent-approval` 条目（描边盾牌 + 填充 AI 星形，与出厂三个图标同风格同 viewBox）。幂等；**DSH 升级会重装原版 bundle，重跑安装脚本即可再补丁**；找不到锚点时降级为警告（菜单只是没图标，功能不受影响）。
+1. **包的 `cordis.patch.yml`（bundle patch）里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / **agent-approval** / danger-full-access）——**声明顺序即菜单顺序**，agent-approval 排在 Full access 上面；DSH 升级若改了基础表要手动同步。
+2. **菜单图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`**（菜单行 + 触发按钮共用；源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**。`scripts/patch-glyph.mjs` 的 `patchPermissionGlyph()` 直接补丁该编译产物：往 `const permissionGlyphs = {` 后插入 `agent-approval` 条目（描边盾牌 + 填充 AI 星形，与出厂三个图标同风格同 viewBox）。幂等；**DSH 升级会重装原版 bundle，重跑 `npm run patch:glyph` 即可再补丁**；找不到锚点时降级为警告（菜单只是没图标，功能不受影响）。
 3. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；命令关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
 4. **事件联动**（`session/event` 监听 `permission/preset`）：
    - 选中 `agent-approval` → `_enableCore`（此刻旋钮事件还没落，捕获的 prev 恰是切换前的值；我们写的旋钮值与预设服务随后要写的相同，它检查后跳过，无重复事件）。
@@ -127,13 +128,15 @@ const run = await this.ctx.subagents.start("spawn", {
 6. **防御**：`_presetRegistered()` 先确认表里有 `agent-approval` 才追加 preset 事件——没装覆盖行时，追加会被会话不变量（unknown preset）直接抛错。
 7. （已随 composer chip 的移除而作废）曾有的 chip 每 10s 轮询一次 enabled 状态；若未来重加 chip，注意 InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询。
 
-### 8. 本地安装 = 复制包 + composition patch
+### 8. 标准安装 = dsh bundle（package.json 声明 + 包内 cordis.patch.yml）
 
-流程（`scripts/install.mjs` 自动做）：
-1. 把插件包复制到 `<DSH_HOME>/profiles/web/node_modules/dsh-agent-approval/`。
-2. 在 `<DSH_HOME>/profiles/web/cordis.patch.yml` 里做两件事：**`- insert:`** 新增插件挂载行（**不要**对不存在的 id 用普通 `- id:`，会报 "entry not found"）；**`- id: permission`** 覆盖预设表行（该 id 已存在，覆盖合法）：
+本插件是**标准 DSH bundle**：`package.json` 的 `dsh.bundle.patch` 指向包内 `cordis.patch.yml`，用官方 `dsh plugin` 命令安装：
+
+1. `dsh plugin --profile web add <本地路径或包>`：pnpm 把插件装成 profile 的 npm 依赖（本地路径走 `link:` 软链，改代码即生效），并把包名追加到 profile `package.json` 的 `dsh.profile.bundles`。
+2. 启动时 DSH 应用包内 `cordis.patch.yml`，做两件事：**`- insert:`** 新增插件挂载行（**不要**对不存在的 id 用普通 `- id:`，会报 "entry not found"）；**`- id: permission`** 覆盖预设表行（该 id 已存在，覆盖合法）：
 
 ```yaml
+# cordis.patch.yml（随包分发）
 - insert:
   - id: agent-approval
     name: 'dsh-agent-approval'
@@ -152,13 +155,17 @@ const run = await this.ctx.subagents.start("spawn", {
       danger-full-access: { sandbox: danger-full-access, approval: never }
 ```
 
-3. 重启 DSH。**必须重启**，Host 加载、typert 注册、client bundle 注入都在启动时发生。
+3. **不要**再在 profile 的 `cordis.patch.yml` 里手工插这些行，否则同一 id 重复挂载、permission 表重复覆盖。
+4. 重启 DSH。**必须重启**，Host 加载、typert 注册、client bundle 注入都在启动时发生。
+5. 卸载：`dsh plugin --profile web remove dsh-agent-approval`（自动从 bundles 列表移除）。
+6. **可选（权限菜单图标）**：菜单图标在官方 bundle 的硬编码映射里，标准安装不会补——本地开发想要图标就 `npm run patch:glyph`（见第 7 节）。
 
 ## 开发 / 验证
 
 ```bash
-npm run check            # node --check index.js client.js typert.host.js
-node scripts/install.mjs # 安装到本机 DSH profile
+npm run check            # node --check index.js client.js typert.host.js scripts/patch-glyph.mjs
+dsh plugin --profile web add /path/to/dsh-agent-approval   # 安装/重装到本机 DSH profile
+npm run patch:glyph      # 可选：权限菜单图标（幂等）
 ```
 
 改插件后**必须重启 DSH 进程**才生效。验证：

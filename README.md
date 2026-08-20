@@ -51,35 +51,26 @@
 
 ## 安装
 
-### 本地安装
+### 标准安装（推荐）
+
+本插件是**标准 DSH bundle**：`package.json` 声明 `dsh.bundle.patch`，包内 `cordis.patch.yml` 同时完成两件事——`- insert:` 挂载插件本身，`- id: permission` 把 **Agent 审批** 预设注册进 `/permission` 菜单。用官方 `dsh plugin` 命令安装：
 
 ```bash
-# 1. 克隆本仓库
-git clone <your-github>/dsh-agent-approval.git
-cd dsh-agent-approval
+# 本地开发：pnpm 软链到本仓库，改代码即生效（无需重新复制）
+dsh plugin --profile web add /path/to/dsh-agent-approval
 
-# 2. 安装到本机 DSH profile（复制插件包 + 写入 cordis.patch.yml）
-node scripts/install.mjs
-
-# 3. 重启 DSH（命令行：node <dsh bin> web --profile web）
+# 正式发布：从 GitHub Release tarball 安装
+dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.2.0/dsh-agent-approval-1.2.0.tgz
 ```
 
-重启后：设置面板出现 **Agent 审批** 页；`/permission` 菜单出现第四项 **Agent 审批**。
+重启 DSH 后：设置面板出现 **Agent 审批** 页；`/permission` 菜单出现第四项 **Agent 审批**。
 
-> 需要插件能在 profile 的 `node_modules` 解析到依赖（`zod`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-typert-protocol`）。若本机 DSH 未提供这些依赖，先在插件目录 `npm install`，再手动把 `node_modules` 一并复制，或把插件作为依赖加入 profile。
+> **可选：权限菜单图标**。菜单图标硬编码在官方 `dsh-client-ui-conversation` 的 `permissionGlyphs` 映射里（无公开注册口），标准安装不会补它——不跑下面的命令只是**菜单项没有图标**，预设与功能不受影响。想让菜单项带盾牌图标，装完再跑一次（幂等；DSH 升级重装原版 bundle 后重跑即可）：
+> ```bash
+> npm run patch:glyph
+> ```
 
-### 手动安装（原理）
-
-1. 将插件包放入 `<DSH_HOME>/profiles/web/node_modules/dsh-agent-approval/`。
-2. 在 `<DSH_HOME>/profiles/web/cordis.patch.yml` 追加：
-
-```yaml
-- insert:
-  - id: agent-approval
-    name: 'dsh-agent-approval'
-```
-
-3. 重启 DSH。
+> `dsh plugin add` 把插件装成 profile 的 npm 依赖并追加到 `dsh.profile.bundles`，启动时自动应用包内 patch。卸载：`dsh plugin --profile web remove dsh-agent-approval`。
 
 ## 使用
 
@@ -96,7 +87,8 @@ dsh-agent-approval/
 ├── index.js            # Host 半：AgentApprovalService（审批瀑布抢占 + spawn 审批 Agent + 审计）
 ├── client.js           # Client 半：设置页「Agent 审批」+ 输入框开关 UI bundle
 ├── typert.host.js      # Typert Host manifest（agentApproval 6 个方法的描述）
-├── scripts/install.mjs # 本地安装脚本
+├── cordis.patch.yml      # dsh bundle patch（挂载行 + permission 预设表覆盖）
+├── scripts/patch-glyph.mjs # 可选：权限菜单图标补丁（标准安装不自动执行）
 ├── .github/workflows/  # GitHub Actions 发布
 ├── AGENTS.md           # 面向 AI agent 的开发指南（含踩坑）
 └── LICENSE             # MIT
@@ -106,7 +98,8 @@ dsh-agent-approval/
 
 ```bash
 npm run check           # node --check index.js client.js typert.host.js
-node scripts/install.mjs
+dsh plugin --profile web add /path/to/dsh-agent-approval   # 安装/重装到本机 DSH profile
+npm run patch:glyph     # 可选：权限菜单图标
 ```
 
 详见 [AGENTS.md](AGENTS.md)——记录了 DSH 正式插件（Host/Client/Typert 三件套）的完整机制、审批瀑布 prepend 抢占与结构化子代理裁决的踩坑。

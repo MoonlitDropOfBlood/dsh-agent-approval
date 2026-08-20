@@ -11,7 +11,7 @@
  *        rationale; hover for the full rationale + tool arguments).
  *
  * Session-level on/off lives in the /permission menu (the "Agent 审批"
- * preset, registered by scripts/install.mjs's profile patch) and the
+ * preset, registered by the package's cordis.patch.yml bundle patch) and the
  * /agent-approval command — deliberately NO composer chip: a second toggle
  * beside the permission menu it belongs to was redundant.
  *

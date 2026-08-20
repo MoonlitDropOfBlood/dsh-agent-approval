@@ -53,8 +53,8 @@ import { join } from "node:path";
 /** The sandbox mode an enabled session is pinned to while the mode is ON. */
 const BASE_MODE = "workspace-write";
 /**
- * The permission-preset table key this plugin registers (via the profile's
- * `permission` row override — see scripts/install.mjs). Selecting it in the
+ * The permission-preset table key this plugin registers (via the package's
+ * `cordis.patch.yml` `permission` row override). Selecting it in the
  * permission menu (or `/permission agent-approval`) enables the mode.
  */
 const PRESET_NAME = "agent-approval";
@@ -67,8 +67,8 @@ const MAX_RECORDS = 200;
 /**
  * On-disk persistence: one JSON object per line in records.jsonl plus the
  * judge settings in config.json. Lives under DSH_HOME (same resolution as
- * scripts/install.mjs), outside any profile's node_modules so reinstalls and
- * upgrades never touch it.
+ * the plugin's own README documents), outside any profile's node_modules so
+ * reinstalls and upgrades never touch it.
  */
 const DATA_DIR = join(process.env.DSH_HOME || join(homedir(), ".dsh"), "agent-approval");
 const RECORDS_FILE = join(DATA_DIR, "records.jsonl");
@@ -321,9 +321,9 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
-   * Whether the preset table currently knows our entry. The profile's
-   * `permission` row override registers it (install.mjs); without it we must
-   * NOT append `permission/preset` events — the session invariant rejects
+   * Whether the preset table currently knows our entry. The package's
+   * `cordis.patch.yml` `permission` row override registers it; without it we
+   * must NOT append `permission/preset` events — the session invariant rejects
    * unknown preset names, and the menu simply will not show the mode.
    */
   _presetRegistered() {
@@ -627,7 +627,7 @@ export class AgentApprovalService extends TypertRemoteService {
       "Judge the operation ITSELF against the user's task and the exact arguments — the stated reason is only supporting evidence: a terse or clumsy reason is NOT grounds for rejection when the operation is plainly safe and consistent with the task, and a well-phrased reason cannot save an operation that is destructive, out of scope, or dishonest about what it does.",
       "Judge the ACTUAL operation, not the escalation level's name: the harness offers only coarse escalation levels (workspace-write vs danger-full-access), so a narrow, task-required operation is acceptable even when it must ride on the broad level.",
       "Development-workflow operations count as task-scoped when they match the task and the arguments:",
-      "- running the project's own documented install/build/deploy scripts (e.g. scripts/install.mjs) that copy the project's own files into the install location its documentation specifies (e.g. the tool's own profile/config/plugin directory under the user home);",
+      "- running the project's own documented install/build/deploy scripts (e.g. the documented `dsh plugin --profile web add <path>` install flow) that place the project's own files into the install location its documentation specifies (e.g. the tool's own profile/config/plugin directory under the user home);",
       "- overwriting files that this same project previously installed there and can regenerate from source (reversible in practice, not an irreversible system change);",
       "- reading tool-owned config or logs needed to debug the task at hand.",
       "REJECT when the operation is destructive (mass deletion, disk formatting, registry/service/system-wide changes), exfiltrates credentials or secrets, touches resources unrelated to the task, modifies the operating system or OTHER applications' data, hides intent behind encoded or obfuscated content, or the reason does not match the arguments.",
