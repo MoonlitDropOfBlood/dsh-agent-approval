@@ -140,7 +140,7 @@ const run = await this.ctx.subagents.start("spawn", {
 # cordis.patch.yml（随包分发）
 - insert:
   - id: agent-approval
-    name: 'dsh-agent-approval'
+    name: '@duke-dsh-plugins/dsh-agent-approval'
 
 - id: permission
   name: '@deepseek-ai/dsh-permission-presets'

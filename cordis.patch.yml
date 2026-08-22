@@ -2,7 +2,7 @@
 # registers the Agent 审批 preset in the permission menu.
 - insert:
   - id: agent-approval
-    name: 'dsh-agent-approval'
+    name: '@duke-dsh-plugins/dsh-agent-approval'
 
 # --- dsh-agent-approval: register the Agent 审批 preset in the permission menu ---
 # Restates the full presets table because a patch REPLACES the `permission`
