@@ -19,7 +19,7 @@
  * (`ctx.remote.agentApproval.*`), published by the Host half in `index.js`.
  */
 window.__ModuleLoader__.load({
-  id: "dsh-agent-approval",
+  id: "@duke-dsh-plugins/dsh-agent-approval",
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
