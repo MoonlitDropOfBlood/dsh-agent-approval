@@ -56,6 +56,17 @@ window.__ModuleLoader__.load({
    hover/active colors without changing the shell's 16px icon rhythm. */
 [data-dsh-agent-approval-settings-nav]>svg:first-child{display:none}
 [data-dsh-agent-approval-settings-nav]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat}
+
+/* /permission menu + composer permission trigger: both pick icons from the
+   permissionGlyphs map compiled into the official dsh-client-ui-conversation
+   bundle ("host-configured names outside the design set get none") — there is
+   no public registration seam, so an external preset row renders with no icon
+   element at all. registerPermissionGlyphIcon marks the Agent 审批 menu row
+   ([role=menu] button[role=menuitem]) and the composer trigger button; CSS
+   draws the same shield + AI-star glyph patch-glyph.mjs used, as a
+   currentColor mask so hover/selected/disabled colors all follow the shell. */
+[data-dsh-agent-approval-perm-item]::before,
+[data-dsh-agent-approval-perm-trigger]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat}
 `;
 
     // ---- Settings nav icon --------------------------------------------------
@@ -91,6 +102,66 @@ window.__ModuleLoader__.load({
         observer.disconnect();
         const marked = document.querySelectorAll("[" + SETTINGS_NAV_MARKER + "]");
         for (let i = 0; i < marked.length; i++) marked[i].removeAttribute(SETTINGS_NAV_MARKER);
+      };
+    }
+
+    // ---- /permission menu + composer trigger icon ----------------------------
+    // The permission surfaces (menu rows and the composer trigger button) pick
+    // icons from the permissionGlyphs map compiled into the official
+    // dsh-client-ui-conversation bundle — external presets get no icon element
+    // at all (see PermissionSelect: `icon === void 0 ? {} : { icon }`). Mark
+    // the two surfaces whose label is this preset's display name so the CSS
+    // above can paint the glyph; the disposer clears both markers.
+    const PERM_ITEM_MARKER = "data-dsh-agent-approval-perm-item";
+    const PERM_TRIGGER_MARKER = "data-dsh-agent-approval-perm-trigger";
+
+    function registerPermissionGlyphIcon(label) {
+      let disposed = false;
+      const sync = function () {
+        if (disposed) return;
+        const currentLabel = String(label).trim();
+        if (currentLabel.length === 0) return;
+        // 1) /permission menu rows: Menu renders [itemIcon?][itemLabel][check?]
+        //    inside button[role=menuitem]; an icon-less row starts at the label.
+        const items = document.querySelectorAll('[role="menu"] button[role="menuitem"]');
+        for (let i = 0; i < items.length; i++) {
+          const button = items[i];
+          const text = button.textContent ? button.textContent.trim() : "";
+          if (text === currentLabel) button.setAttribute(PERM_ITEM_MARKER, "");
+          else button.removeAttribute(PERM_ITEM_MARKER);
+        }
+        // 2) Composer trigger button: [triggerIcon?][triggerLabel][chevron svg];
+        //    with no glyph the icon span is absent, leaving label + chevron.
+        //    Skip menu rows (handled above) and the settings dialog (its nav
+        //    row carries the same label but is owned by the settings-nav icon).
+        const buttons = document.querySelectorAll("button");
+        for (let i = 0; i < buttons.length; i++) {
+          const button = buttons[i];
+          if (button.getAttribute("role") === "menuitem") continue;
+          if (button.closest('[role="dialog"]') !== null) continue;
+          if (button.hasAttribute(SETTINGS_NAV_MARKER)) continue;
+          const spans = button.querySelectorAll(":scope > span");
+          let labelText = "";
+          for (let j = 0; j < spans.length; j++) {
+            const s = spans[j].textContent ? spans[j].textContent.trim() : "";
+            if (s.length > 0) { labelText = s; break; }
+          }
+          const matches = labelText === currentLabel && button.querySelector("svg") !== null;
+          if (matches) button.setAttribute(PERM_TRIGGER_MARKER, "");
+          else button.removeAttribute(PERM_TRIGGER_MARKER);
+        }
+      };
+      sync();
+      const observer = new MutationObserver(sync);
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      return function () {
+        disposed = true;
+        observer.disconnect();
+        const names = [PERM_ITEM_MARKER, PERM_TRIGGER_MARKER];
+        for (let n = 0; n < names.length; n++) {
+          const marked = document.querySelectorAll("[" + names[n] + "]");
+          for (let i = 0; i < marked.length; i++) marked[i].removeAttribute(names[n]);
+        }
       };
     }
 
@@ -189,6 +260,11 @@ window.__ModuleLoader__.load({
       // Mark our settings-nav row so the CSS above replaces the shell's
       // fallback gear (no icon field exists in settings.section yet).
       ctx.effect(() => registerSettingsNavIcon(SETTINGS_LABEL));
+
+      // Mark the /permission menu row and the composer trigger button so the
+      // CSS above paints the preset glyph (external presets get no icon from
+      // the official permissionGlyphs map; no public registration seam).
+      ctx.effect(() => registerPermissionGlyphIcon(SETTINGS_LABEL));
 
       // ctx.get() reads the service without the property-accessor inject guard.
       const remote = ctx.get("remote.agentApproval");
