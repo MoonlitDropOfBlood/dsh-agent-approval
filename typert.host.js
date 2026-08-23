@@ -148,7 +148,7 @@ const _agentApproval_toggle_parameter_0$schema = z.object({
 });
 
 export const TYPERT = {
-  package: "dsh-agent-approval",
+  package: "@duke-dsh-plugins/dsh-agent-approval",
   face: "host",
   schemas: [],
   invocations: [
