@@ -95,7 +95,8 @@ const run = await this.ctx.subagents.start("spawn", {
 - **不会递归审批**：DSH 委派机制自动把子代理的审批策略钉死为 `never`（`captureDelegatedPolicyOverrides`），子代理自己提权只会被直接拒绝。
 - **结果读取**：`run.result`（Promise，不 reject 业务失败）→ `result.structured`（合法裁决）+ `result.stopReason === "completed"`。两者任一不满足 → `unavailable`（fail-closed）。
 - **竞速**：`Promise.race([run.result, abortRace, this.ctx.timeout(timeoutMs)])`，`finally` 里 `run.dispose()`。超时/取消/基础设施故障分别映射 `unavailable`/`cancelled`。
-- **给审批员看的材料**：从会话日志按 `callId` 倒查 `tool/call` 事件的 `arguments` 原始 JSON（**精确命令**，不是转述）、`req.reason`（工具方的提权理由）、workspace cwd、以及**最近 2 条真实用户消息**（`user/message` 且 `source.kind === "user"`，每条截断 800——任务的 ground truth）。审批提示词明确 APPROVE 四条件与 REJECT 清单，并要求"存疑即拒"。
+- **给审批员看的材料**：从会话日志按 `callId` 倒查 `tool/call` 事件的 `arguments` 原始 JSON（**精确命令**，不是转述）、`req.reason`（工具方的提权理由）、workspace cwd、以及**首条真实用户消息（原始任务陈述）+ 最近 3 条真实用户消息**（`user/message` 且 `source.kind === "user"`，每条截断 800——任务的 ground truth；短会话里首条已在最近列表中则去重）。审批提示词明确 APPROVE 四条件与 REJECT 清单，并要求"存疑即拒"。
+- **审批员自身约束消歧（v1.3.5 修复的真实误杀）**：审批员子会话被委派机制钉死 `approval/policy: never`，harness 会向它注入运行时上下文 "Approval prompts are disabled in this session…"。小模型（flash）曾把这句**关于审批员自己**的约束误读为**请求方会话**的属性，两次以此为由拒绝了本该批准的操作（见 records.jsonl 2026-08-21 / 2026-08-22 两条 rejected）。因此 persona 与提示词都显式声明："你自身的 never 策略与固定作用域只约束你自己，绝不可作为请求方会话的属性或拒绝理由"。改提示词时**不要删掉这句**。
 - **裁决一致性口径**：判"操作 vs 用户任务"的**客观对齐**，不依赖请求方理由的措辞水平——理由只是辅助证据：操作本身明显安全且与任务相符时，理由写得简略**不拒**；但理由与实际参数造假/不符仍**照拒**（读过审核标准的 agent 不能靠文笔获得优待）。
 - **开发流程口径**（端到端任务不被卡死的关键）：提权档位只有粗粒度两档，审批员**判实际操作而非档位名**——项目自带的安装/构建/部署脚本写其文档指定的安装路径（如工具自身 profile 目录）、覆盖自身已安装的文件（可从源码再生成）、读调试所需的工具自有配置/日志，都算"任务明确所需"可 approve；但**修改操作系统或其他应用的数据**仍一律 reject。
 
@@ -120,7 +121,7 @@ const run = await this.ctx.subagents.start("spawn", {
 权限菜单（输入框 `/permission` 控件）的选项来自 **`dsh-permission-presets` 的 Config 预设表**；Web 端切换 = 执行 `/permission <preset>` 命令 → 追加 `permission/preset` 事件 + 旋钮事件。要让「Agent 审批」出现在菜单里：
 
 1. **包的 `cordis.patch.yml`（bundle patch）里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / **agent-approval** / danger-full-access）——**声明顺序即菜单顺序**，agent-approval 排在 Full access 上面；DSH 升级若改了基础表要手动同步。
-2. **菜单图标（v1.3.2+ 由插件内置，无需 patch）**：菜单行 + 触发按钮的图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`（源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**，外部预设整行不渲染图标元素。client.js 的 `registerPermissionGlyphIcon(SETTINGS_LABEL)` 用 MutationObserver 给「Agent 审批」的 `/permission` 菜单行（`[role="menu"] button[role="menuitem"]` 中文本等于 label 者）和输入框旁触发按钮（非 menuitem、不在 `[role="dialog"]` 内、首 span 文本等于 label 且含 svg 者）分别打 `data-dsh-agent-approval-perm-item` / `data-dsh-agent-approval-perm-trigger` 标记，CSS 再用 `currentColor` mask 画盾牌 + AI 星形（16×16，与出厂图标同风格）。历史方案 `scripts/patch-glyph.mjs`（直接补丁官方编译产物）已被取代——插件内置版随包分发、DSH 升级不丢；脚本保留作参考，新安装**不再需要**跑它。
+2. **菜单图标（v1.3.2+ 由插件内置，无需 patch）**：菜单行 + 触发按钮的图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`（源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**，外部预设整行不渲染图标元素。client.js 的 `registerPermissionGlyphIcon(SETTINGS_LABEL)` 用 MutationObserver 给「Agent 审批」的 `/permission` 菜单行（`[role="menu"] button[role="menuitem"]` 中文本等于 label 者）和输入框旁触发按钮（非 menuitem、不在 `[role="dialog"]` 内、首 span 文本等于 label 且含 svg 者）分别打 `data-dsh-agent-approval-perm-item` / `data-dsh-agent-approval-perm-trigger` 标记，CSS 再用 `currentColor` mask 画盾牌 + AI 星形（16×16，与出厂图标同风格）。**菜单行有 glyph-set 守卫**：只在"兄弟行已带官方图标"的菜单里打标——判定为菜单内存在 `span[class*="_itemIcon_"]`（CSS-modules 编译保留源类名子串；选中行的对勾是 `_check_`，不会误判）。设置页 → 通用 → 「权限」行的默认预设下拉（`Menu portal:true` 传送到 `<body>`，所有预设都无图标）因此**不再**被误标——否则「Agent 审批」会成为那里唯一带图标的行。历史方案 `scripts/patch-glyph.mjs`（直接补丁官方编译产物）已被取代——插件内置版随包分发、DSH 升级不丢；脚本保留作参考，新安装**不再需要**跑它。
 3. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；命令关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
 4. **事件联动**（`session/event` 监听 `permission/preset`）：
    - 选中 `agent-approval` → `_enableCore`（此刻旋钮事件还没落，捕获的 prev 恰是切换前的值；我们写的旋钮值与预设服务随后要写的相同，它检查后跳过，无重复事件）。
@@ -133,7 +134,7 @@ const run = await this.ctx.subagents.start("spawn", {
 
 本插件是**标准 DSH bundle**：`package.json` 的 `dsh.bundle.patch` 指向包内 `cordis.patch.yml`，用官方 `dsh plugin` 命令安装：
 
-1. `dsh plugin --profile web add <本地路径或包>`：pnpm 把插件装成 profile 的 npm 依赖（本地路径走 `link:` 软链，改代码即生效），并把包名追加到 profile `package.json` 的 `dsh.profile.bundles`。
+1. `dsh plugin --profile web add <本地路径或包>`：pnpm 把插件装成 profile 的 npm 依赖（本地路径走 `link:` 软链，改代码即生效），并把包名追加到 profile `package.json` 的 `dsh.profile.bundles`。**`link:` 安装的前提：插件目录里必须已经 `npm install` 出 `node_modules`**——loader 从链接的**真实路径**加载 `index.js`，其裸导入（`@deepseek-ai/cordis`、`@deepseek-ai/dsh-typert-protocol`、`zod`）从插件自己的 `node_modules` 解析；缺了会在启动时 `ERR_MODULE_NOT_FOUND`，**整个 DSH 起不来**（2026-08-27 实踩）。对齐宿主版本避免双副本漂移：`npm install --no-save --registry=https://registry.npmjs.org @deepseek-ai/cordis@<宿主版本> @deepseek-ai/dsh-typert-protocol@<宿主版本> zod@^4.4.3`（宿主版本从桌面安装目录的 `.pnpm` 仓查）。
 2. 启动时 DSH 应用包内 `cordis.patch.yml`，做两件事：**`- insert:`** 新增插件挂载行（**不要**对不存在的 id 用普通 `- id:`，会报 "entry not found"）；**`- id: permission`** 覆盖预设表行（该 id 已存在，覆盖合法）：
 
 ```yaml

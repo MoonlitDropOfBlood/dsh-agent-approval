@@ -64,7 +64,12 @@ window.__ModuleLoader__.load({
    element at all. registerPermissionGlyphIcon marks the Agent 审批 menu row
    ([role=menu] button[role=menuitem]) and the composer trigger button; CSS
    draws the same shield + AI-star glyph patch-glyph.mjs used, as a
-   currentColor mask so hover/selected/disabled colors all follow the shell. */
+   currentColor mask so hover/selected/disabled colors all follow the shell.
+   Scope guard: only menus that already render the official glyph set
+   (sibling rows carry span._itemIcon_*) qualify — the composer /permission
+   menu does; the settings PermissionRow dropdown (settings.general 权限 row,
+   portaled to <body>) renders NO icons for any preset, so an icon there
+   would be an uninvited extra and is deliberately left unmarked. */
 [data-dsh-agent-approval-perm-item]::before,
 [data-dsh-agent-approval-perm-trigger]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat}
 `;
@@ -123,12 +128,30 @@ window.__ModuleLoader__.load({
         if (currentLabel.length === 0) return;
         // 1) /permission menu rows: Menu renders [itemIcon?][itemLabel][check?]
         //    inside button[role=menuitem]; an icon-less row starts at the label.
+        //    Glyph-set guard: only mark our row in menus where the official
+        //    presets already render their permissionGlyphs (sibling rows carry
+        //    span[class*="_itemIcon_"] — the CSS-modules build keeps the source
+        //    class name as a substring). The composer /permission menu
+        //    qualifies; the settings PermissionRow dropdown (portaled to
+        //    <body>, no item icons for any preset) does NOT, so the glyph no
+        //    longer leaks into the settings page. (The selected-row checkmark
+        //    svg is class "_check_", not "_itemIcon_", so it cannot fake the
+        //    guard.)
+        const menus = document.querySelectorAll('[role="menu"]');
+        const glyphMenus = [];
+        for (let i = 0; i < menus.length; i++) {
+          if (menus[i].querySelector('span[class*="_itemIcon_"]') !== null) glyphMenus.push(menus[i]);
+        }
         const items = document.querySelectorAll('[role="menu"] button[role="menuitem"]');
         for (let i = 0; i < items.length; i++) {
           const button = items[i];
           const text = button.textContent ? button.textContent.trim() : "";
-          if (text === currentLabel) button.setAttribute(PERM_ITEM_MARKER, "");
-          else button.removeAttribute(PERM_ITEM_MARKER);
+          const menu = button.closest('[role="menu"]');
+          if (text === currentLabel && menu !== null && glyphMenus.indexOf(menu) !== -1) {
+            button.setAttribute(PERM_ITEM_MARKER, "");
+          } else {
+            button.removeAttribute(PERM_ITEM_MARKER);
+          }
         }
         // 2) Composer trigger button: [triggerIcon?][triggerLabel][chevron svg];
         //    with no glyph the icon span is absent, leaving label + chevron.
