@@ -10,7 +10,7 @@
 - 审批 Agent 在**独立会话**里运行：零父级上下文、全局工具全部空白（`toolFilter: {allow:[]}`）、审批策略被委派机制钉死为 `never`（不可能递归再审批），必须通过 `structured_output` 结构化工具给出裁决：`{ decision: approve|reject, riskLevel, rationale }`。
 - **风险即拒绝**：破坏性 / 不可逆 / 越界 / 理由与实际参数不符 → `reject`；只有"安全、可逆、与任务相符、理由诚实"才 `approve`。
 - **Fail-closed**：审批 Agent 启动失败、超时、结果不合法、请求被取消 → 一律按拒绝处理（`unavailable`/`cancelled`），绝不静默放行。
-- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或 Harness 默认模型）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话、**最近审批记录（审计，本地持久化）**（结论/风险/模型/耗时/理由，悬停看完整理由与工具参数）。
+- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或 Harness 默认模型）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化，审计行可一键「加白」）、**最近审批记录（审计，本地持久化）**（结论/风险/模型/耗时/理由，悬停看完整理由与工具参数）。
 - 输入框 `/permission` 菜单的「Agent 审批」预设 + `/agent-approval on|off` 命令为当前会话开关（**刻意没有 composer chip**——开关本就属于权限菜单，菜单旁边再放一个属冗余，已移除）；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
 
 ## 目录结构
@@ -95,17 +95,28 @@ const run = await this.ctx.subagents.start("spawn", {
 - **不会递归审批**：DSH 委派机制自动把子代理的审批策略钉死为 `never`（`captureDelegatedPolicyOverrides`），子代理自己提权只会被直接拒绝。
 - **结果读取**：`run.result`（Promise，不 reject 业务失败）→ `result.structured`（合法裁决）+ `result.stopReason === "completed"`。两者任一不满足 → `unavailable`（fail-closed）。
 - **竞速**：`Promise.race([run.result, abortRace, this.ctx.timeout(timeoutMs)])`，`finally` 里 `run.dispose()`。超时/取消/基础设施故障分别映射 `unavailable`/`cancelled`。
-- **给审批员看的材料**：从会话日志按 `callId` 倒查 `tool/call` 事件的 `arguments` 原始 JSON（**精确命令**，不是转述）、`req.reason`（工具方的提权理由）、workspace cwd、以及**首条真实用户消息（原始任务陈述）+ 最近 3 条真实用户消息**（`user/message` 且 `source.kind === "user"`，每条截断 800——任务的 ground truth；短会话里首条已在最近列表中则去重）。审批提示词明确 APPROVE 四条件与 REJECT 清单，并要求"存疑即拒"。
+- **给审批员看的材料**：从会话日志按 `callId` 倒查 `tool/call` 事件的 `arguments` 原始 JSON（**精确命令**，不是转述）、`req.reason`（工具方的提权理由）、workspace cwd、以及**首条真实用户消息（原始任务陈述）+ 最近 3 条真实用户消息**（`user/message` 且 `source.kind === "user"`，每条截断 800——任务的 ground truth；短会话里首条已在最近列表中则去重）。审批提示词明确 APPROVE 四条件与 REJECT 清单；v1.4.0 起**删除"存疑即拒"**——拒绝必须能指出该操作的**具体可信风险点**（毁什么/泄什么/越什么界），笼统不确定、没见过的命令、简略的理由都不是拒绝理由（误杀治理，见第 5 节规则表）。
 - **审批员自身约束消歧（v1.3.5 修复的真实误杀）**：审批员子会话被委派机制钉死 `approval/policy: never`，harness 会向它注入运行时上下文 "Approval prompts are disabled in this session…"。小模型（flash）曾把这句**关于审批员自己**的约束误读为**请求方会话**的属性，两次以此为由拒绝了本该批准的操作（见 records.jsonl 2026-08-21 / 2026-08-22 两条 rejected）。因此 persona 与提示词都显式声明："你自身的 never 策略与固定作用域只约束你自己，绝不可作为请求方会话的属性或拒绝理由"。改提示词时**不要删掉这句**。
 - **裁决一致性口径**：判"操作 vs 用户任务"的**客观对齐**，不依赖请求方理由的措辞水平——理由只是辅助证据：操作本身明显安全且与任务相符时，理由写得简略**不拒**；但理由与实际参数造假/不符仍**照拒**（读过审核标准的 agent 不能靠文笔获得优待）。
 - **开发流程口径**（端到端任务不被卡死的关键）：提权档位只有粗粒度两档，审批员**判实际操作而非档位名**——项目自带的安装/构建/部署脚本写其文档指定的安装路径（如工具自身 profile 目录）、覆盖自身已安装的文件（可从源码再生成）、读调试所需的工具自有配置/日志，都算"任务明确所需"可 approve；但**修改操作系统或其他应用的数据**仍一律 reject。
 
-### 5. 审计记录
+### 5. 规则表与会话内信任（v1.4.0 起，先于模型裁决）
+
+提权进入 `_judge` 后按固定顺序短路，全部**零模型开销、零人工弹窗**：
+
+1. **deny 规则命中 → 直接 `rejected`**（所有 deny 先于任何 allow 判定，后加的 deny 永远压过先加的 allow）；**allow 规则命中 → 直接 `allowed-once`**。规则形状 `{ id, effect, tool, match, note, createdAt }`，持久化在 config.json 的 `rules` 字段：`tool` 为精确工具名或 `"*"`；`match` 为空 = 该工具全部调用，否则是**参数原始 JSON 的子串**或 `/pattern/flags` 正则（`_ruleRegex` 编译失败 = 永不命中，`addRule` 时即校验拒绝）。规则命中也写审计（model 列记 `rule`）。
+2. **会话内信任缓存**：模型 approve 后把 `工具名 + "\n" + 参数原始 JSON` 指纹存入该会话的 Set（`_trusted` Map）；同一会话内**参数逐字节相同**的再次提权直接 `allowed-once`（审计 model 列记 `trust`）。**不跨会话、不泛化到相似参数**，随 `_enabled` 条目一起在三处删除点清空（preset 切走 / session disposed / `_disable`）。跨会话复用走规则表：设置页审计行的「加白」按钮一键把已批准操作存成 allow 规则（记录里的 args 是完整参数 JSON 的**前缀**，截断标记 `…[truncated]` 需先剥掉）。
+3. 都不命中才 spawn 审批模型。
+
+- 设置页「放行 / 拒绝规则」卡片管理规则（Remote 方法 `addRule`/`removeRule`，整表返回；`getState` 带 `rules` 字段，client 对旧 Host 缺该字段时降级为 `[]`）。
+- wire 变更照旧三处同步：index.js 构造、typert.host.js（`ruleSchema` + `rulesValueSchema` + 两个 invocation + `AgentApprovalRule`/`AgentApprovalRulesResult` 类型声明）、client.js（描述符 + UI）。
+
+### 6. 审计记录
 
 - 内存环形数组，上限 200 条，`getState()` 返回倒序最近 50 条；**每条同时追加落盘** `<DSH_HOME>/agent-approval/records.jsonl`（JSONL，一行一条），启动时读回最近 200 条并把文件压实回上限（防无限增长），`clearRecords` 同步清空文件。每条：时间、会话（短 id）、工具、结论、风险等级、审批模型、耗时、理由（截断 600）、`childSessionId`（审批 Agent 自己的会话短 id——在会话列表里能找到完整推理记录）。
 - **必须整形状构造**（`typert.host.js` 的 result schema 是 strict）：每个字段都在、类型正确，数组用 `.readonly()`。新增字段要同步改三处（index.js 构造、typert schema、client 展示）。
 
-### 6. Client 半：bundle 格式
+### 7. Client 半：bundle 格式
 
 - 必须 `window.__ModuleLoader__.load({ id, factory })`，`exports.inject = ["slots", "remote"]`。
 - **按钮一律用官方 Button 原子**：`const ui = require("@deepseek-ai/dsh-client-ui-primitives")`，`h(ui.Button, { variant: "primary"|"ghost"|"outline", size: "sm", onClick }, "…")`。自定义 `.aapr-btn` 按钮样式已移除——它不跟 `--dsw-alias-button-*` token 家族，深色模式下难看（与 dsh-memory-manager 踩过的同一个坑，同一个修法）。
@@ -116,7 +127,7 @@ const run = await this.ctx.subagents.start("spawn", {
 - **设置导航图标**：DSH 0.1.x 的 `settings.section` 只投影 `id/order/label`，设置壳对每个外部 section 统一画通用齿轮（`client-ui-settings-general` 的 `navIcon()`，没有公开图标字段）。client.js 里 `registerSettingsNavIcon(SETTINGS_LABEL)` 用 MutationObserver 给 `[role="dialog"] nav button` 中文本等于 section label 的行打 `data-dsh-agent-approval-settings-nav` 标记，CSS 再隐藏 `>svg:first-child` 齿轮、用 `currentColor` mask 画 shield-check Lucide 图标（16px，跟随原生 hover/active 颜色）。换图标只需替换 CSS 里 data URI 的 SVG path（Lucide，24×24，stroke-width 2，stroke 用 black——mask 只取 alpha）。
 - client.js 里**不要用 `?.` / `??`**（与 token-stats 保持一致的保守写法），用 `&&`/`||`；不要 `import`，用 `require("react")`。
 
-### 7. 权限菜单集成（`permission` 行覆盖 + `permission/preset` 事件联动）
+### 8. 权限菜单集成（`permission` 行覆盖 + `permission/preset` 事件联动）
 
 权限菜单（输入框 `/permission` 控件）的选项来自 **`dsh-permission-presets` 的 Config 预设表**；Web 端切换 = 执行 `/permission <preset>` 命令 → 追加 `permission/preset` 事件 + 旋钮事件。要让「Agent 审批」出现在菜单里：
 
@@ -130,7 +141,7 @@ const run = await this.ctx.subagents.start("spawn", {
 6. **防御**：`_presetRegistered()` 先确认表里有 `agent-approval` 才追加 preset 事件——没装覆盖行时，追加会被会话不变量（unknown preset）直接抛错。
 7. （已随 composer chip 的移除而作废）曾有的 chip 每 10s 轮询一次 enabled 状态；若未来重加 chip，注意 InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询。
 
-### 8. 标准安装 = dsh bundle（package.json 声明 + 包内 cordis.patch.yml）
+### 9. 标准安装 = dsh bundle（package.json 声明 + 包内 cordis.patch.yml）
 
 本插件是**标准 DSH bundle**：`package.json` 的 `dsh.bundle.patch` 指向包内 `cordis.patch.yml`，用官方 `dsh plugin` 命令安装：
 
@@ -160,7 +171,7 @@ const run = await this.ctx.subagents.start("spawn", {
 3. **不要**再在 profile 的 `cordis.patch.yml` 里手工插这些行，否则同一 id 重复挂载、permission 表重复覆盖。
 4. 重启 DSH。**必须重启**，Host 加载、typert 注册、client bundle 注入都在启动时发生。
 5. 卸载：`dsh plugin --profile web remove dsh-agent-approval`（自动从 bundles 列表移除）。
-6. **可选（权限菜单图标）**：菜单图标在官方 bundle 的硬编码映射里，标准安装不会补——本地开发想要图标就 `npm run patch:glyph`（见第 7 节）。
+6. **可选（权限菜单图标）**：菜单图标在官方 bundle 的硬编码映射里，标准安装不会补——本地开发想要图标就 `npm run patch:glyph`（见第 8 节）。
 
 ## 开发 / 验证
 
@@ -177,6 +188,7 @@ npm run patch:glyph      # 可选：权限菜单图标（幂等）
 4. `/agent-approval off` 关闭：沙箱模式与审批策略恢复开启前的值，菜单同步切回对应预设；再次提权回到人工弹窗（ask）或原策略行为。
 5. 菜单切到 danger-full-access：模式自动关闭（`permission/preset` 事件联动，立即生效）；菜单切回 Agent 审批：模式自动开启，无需手动执行命令。
 6. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
+7. 设置页加一条 allow 规则（如工具 `pwsh` + match 子串）→ 命中的提权**不再起审批子代理**，审计 model 列显示 `rule`；模型批准的提权在同一会话内以完全相同参数再次发起 → 直接放行，model 列显示 `trust`；审计行点「加白」→ 规则表新增对应 allow 规则。
 
 ## 发布
 

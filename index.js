@@ -18,15 +18,19 @@
  *   2. JUDGE      — this service claims the `approval/request` waterfall with
  *      `{ prepend: true }`, so it runs BEFORE the interactive UI answerer:
  *      an enabled session never pops a human prompt. Every escalation ask is
- *      routed to a ONE-SHOT `spawn` subagent (own session, zero parent
+ *      first checked against the deterministic rule table (persisted
+ *      allow/deny rules; deny wins) and then the per-session trust cache (a
+ *      judge-approved, byte-identical call is not re-judged) — both
+ *      short-circuit with zero model cost. Only a miss on both is routed to
+ *      a ONE-SHOT `spawn` subagent (own session, zero parent
  *      context, approval policy pinned to `never` by the delegation itself,
  *      every global tool blanked via `toolFilter: { allow: [] }`) that must
  *      answer through a structured-output schema:
  *          { decision: approve|reject, riskLevel, rationale }
  *      The judge sees the exact tool arguments (read from the session log by
- *      `callId`) plus the asker's stated reason, and is instructed to fail
- *      closed: destructive / irreversible / out-of-scope / dishonest requests
- *      are rejected.
+ *      `callId`) plus the asker's stated reason. A rejection must name the
+ *      concrete, credible risk the operation creates (destructive /
+ *      irreversible / out-of-scope / dishonest); vague unease is approved.
  *
  *   3. FAIL CLOSED — any infrastructure fault, timeout, malformed verdict, or
  *      cancellation maps to the fail-closed approval outcomes
@@ -105,7 +109,7 @@ const VERDICT_SCHEMA = {
 const APPROVER_PERSONA = [
   "You are an independent security approval agent inside a coding harness.",
   "Your only job is to judge ONE request for wider sandbox access and report the verdict through the structured_output tool.",
-  "You are conservative and fail closed: when uncertain, when the operation is destructive or irreversible, when it reaches outside its stated purpose, or when the stated justification does not match the actual arguments, you REJECT.",
+  "You reject what is concretely dangerous — destructive or irreversible operations, ones that reach outside their stated purpose, or requests whose stated justification does not match the actual arguments. Mere uncertainty, an unfamiliar command, or a terse justification is never enough: every rejection must name the concrete risk the operation creates.",
   "Your own judging session is deliberately sandboxed: approvals are disabled for YOU and your permission scope is fixed. That describes only your own environment — never cite your own constraints (or anything your runtime context says about YOUR permissions) as a property of the requesting session or as grounds for rejection.",
   "You never ask questions, never attempt the operation yourself, and never finish with a plain-text answer.",
 ].join(" ");
@@ -184,6 +188,8 @@ export class AgentApprovalService extends TypertRemoteService {
     markRemoteMethod(this, "setModel", "setModel");
     markRemoteMethod(this, "setApprovalTimeout", "setApprovalTimeout");
     markRemoteMethod(this, "toggle", "toggle");
+    markRemoteMethod(this, "addRule", "addRule");
+    markRemoteMethod(this, "removeRule", "removeRule");
     markRemoteMethod(this, "clearRecords", "clearRecords");
     markRemoteMethod(this, "directory", "directory");
 
@@ -195,6 +201,19 @@ export class AgentApprovalService extends TypertRemoteService {
     this._enabled = new Map();
     /** Audit records, oldest first, capped at MAX_RECORDS. */
     this._records = [];
+    /**
+     * Deterministic rules judged BEFORE the model (persisted in config.json):
+     * [{ id, effect: "allow"|"deny", tool, match, note, createdAt }]. A hit
+     * short-circuits the judge entirely — no subagent, no latency.
+     */
+    this._rules = [];
+    /**
+     * sessionId -> Set of "toolName\nargsJson" fingerprints the judge already
+     * approved in that session. Re-judging a byte-identical call is pure
+     * latency; the cache never crosses sessions and never generalizes to
+     * merely-similar arguments. Dropped with the session's enable entry.
+     */
+    this._trusted = new Map();
 
     // Claim escalations BEFORE the interactive answerer. The host apiproxy
     // answerer registered earlier (composition load order); `{ prepend: true }`
@@ -222,6 +241,7 @@ export class AgentApprovalService extends TypertRemoteService {
           this._enableCore(session, agent);
         } else if (this._enabled.has(session.id)) {
           this._enabled.delete(session.id);
+          this._trusted.delete(session.id);
         }
       } catch (e) {
         /* an emit listener must never throw */
@@ -248,7 +268,10 @@ export class AgentApprovalService extends TypertRemoteService {
     // A disposed session's bookkeeping entry is dead weight — drop it.
     this.ctx.on("session/disposed", (session) => {
       try {
-        if (session) this._enabled.delete(session.id);
+        if (session) {
+          this._enabled.delete(session.id);
+          this._trusted.delete(session.id);
+        }
       } catch (e) {
         /* cleanup only */
       }
@@ -410,6 +433,7 @@ export class AgentApprovalService extends TypertRemoteService {
     const prev = this._enabled.get(session.id);
     if (prev === undefined) return "agent-approval is not ON for this session";
     this._enabled.delete(session.id);
+    this._trusted.delete(session.id);
     if (!restoreKnobs) return "agent-approval OFF: previous permission knobs restored";
     if (
       typeof prev.prevSandbox === "string" &&
@@ -457,6 +481,64 @@ export class AgentApprovalService extends TypertRemoteService {
     }
   }
 
+  // ---- deterministic rules + session trust ----------------------------------
+
+  /**
+   * Compile a rule's `match`: "" matches every call of the tool;
+   * "/pattern/flags" is a regex; anything else is a plain substring tested
+   * against the raw arguments JSON. Returns undefined for the substring form,
+   * null for an invalid regex (rejected at add time; a corrupt persisted rule
+   * simply never matches).
+   */
+  _ruleRegex(match) {
+    if (match.length < 2 || match[0] !== "/") return undefined;
+    const last = match.lastIndexOf("/");
+    if (last <= 0) return undefined;
+    try {
+      return new RegExp(match.slice(1, last), match.slice(last + 1));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Whether one rule hits this exact call. */
+  _ruleMatches(rule, toolName, argsRaw) {
+    if (rule.tool !== "*" && rule.tool !== toolName) return false;
+    if (rule.match === "") return true;
+    const args = typeof argsRaw === "string" ? argsRaw : "";
+    const re = this._ruleRegex(rule.match);
+    if (re === null) return false;
+    if (re !== undefined) return re.test(args);
+    return args.indexOf(rule.match) !== -1;
+  }
+
+  /**
+   * First hitting rule — every deny rule is evaluated before any allow rule
+   * may win, so a later-added deny always overrides an earlier allow.
+   * Undefined when nothing hits.
+   */
+  _matchRules(toolName, argsRaw) {
+    let allowHit;
+    for (const rule of this._rules) {
+      if (!this._ruleMatches(rule, toolName, argsRaw)) continue;
+      if (rule.effect === "deny") return rule;
+      if (allowHit === undefined) allowHit = rule;
+    }
+    return allowHit;
+  }
+
+  /** Owned plain copies for the wire (strict result schema). */
+  _rulesSnapshot() {
+    return this._rules.map((r) => ({
+      id: String(r.id),
+      effect: r.effect === "deny" ? "deny" : "allow",
+      tool: String(r.tool),
+      match: String(r.match),
+      note: String(r.note),
+      createdAt: String(r.createdAt),
+    }));
+  }
+
   // ---- audit ----------------------------------------------------------------
 
   /** Coerce one entry to the strict wire shape (typert result schema). */
@@ -501,11 +583,12 @@ export class AgentApprovalService extends TypertRemoteService {
     }
   }
 
-  /** Persist the judge settings (model override + timeout) to config.json. */
+  /** Persist the judge settings (model override + timeout + rules) to config.json. */
   _persistConfig() {
     const body = JSON.stringify({
       model: { provider: this._model.provider, model: this._model.model },
       timeoutMs: this._timeoutMs,
+      rules: this._rules,
     });
     mkdir(DATA_DIR, { recursive: true })
       .then(() => writeFile(CONFIG_FILE, body, "utf8"))
@@ -532,6 +615,27 @@ export class AgentApprovalService extends TypertRemoteService {
         }
         if (typeof cfg.timeoutMs === "number" && Number.isFinite(cfg.timeoutMs)) {
           this._timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.floor(cfg.timeoutMs)));
+        }
+        if (Array.isArray(cfg.rules)) {
+          const rules = [];
+          for (const raw of cfg.rules) {
+            if (!raw || typeof raw !== "object") continue;
+            if (raw.effect !== "allow" && raw.effect !== "deny") continue;
+            if (typeof raw.tool !== "string" || raw.tool === "") continue;
+            if (typeof raw.match !== "string") continue;
+            rules.push({
+              id:
+                typeof raw.id === "string" && raw.id !== ""
+                  ? raw.id
+                  : Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+              effect: raw.effect,
+              tool: raw.tool,
+              match: raw.match,
+              note: typeof raw.note === "string" ? raw.note : "",
+              createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
+            });
+          }
+          this._rules = rules;
         }
       }
     } catch (e) {
@@ -651,7 +755,7 @@ export class AgentApprovalService extends TypertRemoteService {
       "- reading tool-owned config or logs needed to debug the task at hand.",
       "REJECT when the operation is destructive (mass deletion, disk formatting, registry/service/system-wide changes), exfiltrates credentials or secrets, touches resources unrelated to the task, modifies the operating system or OTHER applications' data, hides intent behind encoded or obfuscated content, or the reason does not match the arguments.",
       "Your own judging session is deliberately sandboxed: approvals are disabled for YOU and your permission scope is fixed by design. Anything your own runtime context says about YOUR permissions describes only you — it says nothing about the requesting session, and must never be cited as a property of that session or as grounds for rejection.",
-      "When uncertain, REJECT. Report the verdict via the structured_output tool only.",
+      "REJECT only when you can name a concrete, credible risk THIS specific operation creates — what it would destroy, leak, or change beyond the user's task. Vague unease, an unfamiliar command, or a terse stated reason is NOT a concrete risk: when no concrete risk exists and the operation fits the task, APPROVE. Report the verdict via the structured_output tool only.",
     );
     return lines.join("\n");
   }
@@ -733,17 +837,46 @@ export class AgentApprovalService extends TypertRemoteService {
     const startedAt = new Date().toISOString();
     const t0 = Date.now();
     const argsRaw = this._callArgsOf(session, req.callId);
-    const route = this._judgeRoute();
+    const toolName = String(req.toolName);
     const base = {
       at: startedAt,
       sessionId: shortId(session.id),
-      toolName: String(req.toolName),
+      toolName: toolName,
       reason: trunc(req.reason, 300),
       args: trunc(argsRaw, 2000),
-      model: route.label,
       durationMs: 0,
       childSessionId: "",
     };
+
+    // 1. Deterministic rules run BEFORE the model — zero latency, zero cost.
+    //    Deny beats allow (see _matchRules); both are recorded for audit.
+    const rule = this._matchRules(toolName, argsRaw);
+    if (rule !== undefined) {
+      const text =
+        (rule.effect === "deny" ? "matched deny rule" : "matched allow rule") +
+        " [tool=" + rule.tool + (rule.match !== "" ? " match=" + rule.match : "") + "]" +
+        (rule.note !== "" ? " — " + rule.note : "");
+      base.durationMs = Date.now() - t0;
+      if (rule.effect === "deny") {
+        this._record({ ...base, outcome: "rejected", riskLevel: "-", model: "rule", rationale: trunc(text, 600) });
+        return "rejected";
+      }
+      this._record({ ...base, outcome: "allowed-once", riskLevel: "-", model: "rule", rationale: trunc(text, 600) });
+      return "allowed-once";
+    }
+
+    // 2. Session trust: a byte-identical call (same tool, same arguments JSON)
+    //    the judge already approved in this session is not re-judged.
+    const trustKey = typeof argsRaw === "string" ? toolName + "\n" + argsRaw : undefined;
+    const trusted = this._trusted.get(session.id);
+    if (trustKey !== undefined && trusted !== undefined && trusted.has(trustKey)) {
+      base.durationMs = Date.now() - t0;
+      this._record({ ...base, outcome: "allowed-once", riskLevel: "-", model: "trust", rationale: "trusted: an identical operation was already approved in this session" });
+      return "allowed-once";
+    }
+
+    // 3. The model judge.
+    const route = this._judgeRoute();
 
     let run;
     try {
@@ -760,7 +893,7 @@ export class AgentApprovalService extends TypertRemoteService {
         persona: APPROVER_PERSONA,
       });
     } catch (error) {
-      this._record({ ...base, outcome: "unavailable", riskLevel: "-", rationale: "approval agent failed to start: " + errText(error) });
+      this._record({ ...base, outcome: "unavailable", riskLevel: "-", model: route.label, rationale: "approval agent failed to start: " + errText(error) });
       return "unavailable";
     }
     base.childSessionId = shortId(run.id);
@@ -801,21 +934,33 @@ export class AgentApprovalService extends TypertRemoteService {
           ...base,
           outcome: approved ? "allowed-once" : "rejected",
           riskLevel: String(verdict.riskLevel || "-"),
+          model: route.label,
           rationale: trunc(verdict.rationale, 600),
         });
+        // Trust one approved fingerprint for the rest of the session: the
+        // next byte-identical call short-circuits before the model.
+        if (approved && trustKey !== undefined) {
+          let set = this._trusted.get(session.id);
+          if (set === undefined) {
+            set = new Set();
+            this._trusted.set(session.id, set);
+          }
+          set.add(trustKey);
+        }
         return approved ? "allowed-once" : "rejected";
       }
       this._record({
         ...base,
         outcome: "unavailable",
         riskLevel: "-",
+        model: route.label,
         rationale:
           "approval agent returned no valid verdict (stopReason: " + String(result.stopReason) + ")",
       });
       return "unavailable";
     }
     if (winner.kind === "aborted") {
-      this._record({ ...base, outcome: "cancelled", riskLevel: "-", rationale: "request cancelled while the approval agent was judging" });
+      this._record({ ...base, outcome: "cancelled", riskLevel: "-", model: route.label, rationale: "request cancelled while the approval agent was judging" });
       return "cancelled";
     }
     if (winner.kind === "timeout") {
@@ -823,15 +968,49 @@ export class AgentApprovalService extends TypertRemoteService {
         ...base,
         outcome: "unavailable",
         riskLevel: "-",
+        model: route.label,
         rationale: "approval agent timed out after " + String(this._timeoutMs) + "ms (fail closed)",
       });
       return "unavailable";
     }
-    this._record({ ...base, outcome: "unavailable", riskLevel: "-", rationale: "approval agent infrastructure fault: " + errText(winner.error) });
+    this._record({ ...base, outcome: "unavailable", riskLevel: "-", model: route.label, rationale: "approval agent infrastructure fault: " + errText(winner.error) });
     return "unavailable";
   }
 
   // ---- Remote API ------------------------------------------------------------
+
+  /**
+   * Display info for every enabled session: the same log-backed title the
+   * session list shows (via the optional `sessionTitle` service) plus the
+   * workspace cwd, so the Settings chips are recognizable. Every read is a
+   * best-effort leaf read on owned plain objects; a disposed agent, an absent
+   * title service, or a missing header field degrades to "".
+   */
+  _sessionInfos() {
+    const titles = this.ctx.get("sessionTitle");
+    const out = [];
+    for (const sid of this._enabled.keys()) {
+      let title = "";
+      let cwd = "";
+      const agent = this.ctx.agents.get(sid);
+      const session = agent === undefined ? undefined : agent.session;
+      if (session !== undefined) {
+        try {
+          const snap = titles === undefined ? undefined : titles.get(session);
+          if (snap && typeof snap.title === "string") title = snap.title;
+        } catch (e) {
+          /* title read is best-effort */
+        }
+        try {
+          if (session.header && typeof session.header.cwd === "string") cwd = session.header.cwd;
+        } catch (e) {
+          /* header access is best-effort */
+        }
+      }
+      out.push({ id: String(sid), title: title, cwd: cwd });
+    }
+    return out;
+  }
 
   /** Snapshot for the Settings page. */
   async getState() {
@@ -840,7 +1019,8 @@ export class AgentApprovalService extends TypertRemoteService {
       value: {
         model: { provider: this._model.provider, model: this._model.model },
         timeoutMs: this._timeoutMs,
-        enabledSessions: Array.from(this._enabled.keys()).map(String),
+        enabledSessions: this._sessionInfos(),
+        rules: this._rulesSnapshot(),
         records: this._records.slice(-50).reverse(),
       },
     };
@@ -883,6 +1063,47 @@ export class AgentApprovalService extends TypertRemoteService {
       };
     }
     return { ok: true, value: { message: this._setEnabled(agent, want) } };
+  }
+
+  /**
+   * Add one deterministic rule and persist the table. `tool` is an exact tool
+   * name or "*" for every tool; `match` is "" (every call of that tool), a
+   * plain substring, or "/pattern/flags" tested against the raw arguments
+   * JSON. Returns the full table.
+   */
+  async addRule(request) {
+    const effect = request && request.effect === "deny" ? "deny" : "allow";
+    const tool = request && typeof request.tool === "string" ? request.tool.trim() : "";
+    const match = request && typeof request.match === "string" ? request.match : "";
+    const note = request && typeof request.note === "string" ? trunc(request.note, 200) : "";
+    if (tool === "") {
+      return { ok: false, error: { code: "invalid-rule", message: 'tool is required ("*" matches every tool)' } };
+    }
+    if (this._ruleRegex(match) === null) {
+      return { ok: false, error: { code: "invalid-rule", message: "invalid /regex/flags match expression" } };
+    }
+    this._rules.push({
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+      effect: effect,
+      tool: tool,
+      match: match,
+      note: note,
+      createdAt: new Date().toISOString(),
+    });
+    this._persistConfig();
+    return { ok: true, value: { rules: this._rulesSnapshot() } };
+  }
+
+  /** Remove one rule by id and persist the table. Returns the full table. */
+  async removeRule(request) {
+    const id = request && typeof request.id === "string" ? request.id : "";
+    const before = this._rules.length;
+    this._rules = this._rules.filter((r) => r.id !== id);
+    if (this._rules.length === before) {
+      return { ok: false, error: { code: "rule-not-found", message: "no rule with that id" } };
+    }
+    this._persistConfig();
+    return { ok: true, value: { rules: this._rulesSnapshot() } };
   }
 
   /** Clear the audit records (memory + persisted file). */

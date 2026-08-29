@@ -41,11 +41,31 @@ const modelRouteSchema = z
   })
   .readonly();
 
+const enabledSessionSchema = z
+  .object({
+    id: z.string(),
+    title: z.string(),
+    cwd: z.string(),
+  })
+  .readonly();
+
+const ruleSchema = z
+  .object({
+    id: z.string(),
+    effect: z.enum(["allow", "deny"]),
+    tool: z.string(),
+    match: z.string(),
+    note: z.string(),
+    createdAt: z.string(),
+  })
+  .readonly();
+
 const stateValueSchema = z
   .object({
     model: modelRouteSchema,
     timeoutMs: z.number(),
-    enabledSessions: z.array(z.string()).readonly(),
+    enabledSessions: z.array(enabledSessionSchema).readonly(),
+    rules: z.array(ruleSchema).readonly(),
     records: z.array(recordSchema).readonly(),
   })
   .readonly();
@@ -65,6 +85,12 @@ const setTimeoutValueSchema = z
 const toggleValueSchema = z
   .object({
     message: z.string(),
+  })
+  .readonly();
+
+const rulesValueSchema = z
+  .object({
+    rules: z.array(ruleSchema).readonly(),
   })
   .readonly();
 
@@ -128,6 +154,8 @@ const stateResultSchema = okResult(stateValueSchema);
 const setModelResultSchema = okResult(setModelValueSchema);
 const setTimeoutResultSchema = okResult(setTimeoutValueSchema);
 const toggleResultSchema = okResult(toggleValueSchema);
+const addRuleResultSchema = okResult(rulesValueSchema);
+const removeRuleResultSchema = okResult(rulesValueSchema);
 const clearRecordsResultSchema = okResult(clearRecordsValueSchema);
 const directoryResultSchema = okResult(directoryValueSchema);
 
@@ -145,6 +173,17 @@ const _agentApproval_setApprovalTimeout_parameter_0$schema = z.object({
 const _agentApproval_toggle_parameter_0$schema = z.object({
   sessionId: z.string(),
   on: z.boolean(),
+});
+
+const _agentApproval_addRule_parameter_0$schema = z.object({
+  effect: z.enum(["allow", "deny"]),
+  tool: z.string(),
+  match: z.string(),
+  note: z.string(),
+});
+
+const _agentApproval_removeRule_parameter_0$schema = z.object({
+  id: z.string(),
 });
 
 export const TYPERT = {
@@ -242,6 +281,56 @@ export const TYPERT = {
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
     {
+      id: "dsh-agent-approval#agentApproval/addRule",
+      service: "agentApproval",
+      namespace: "agentApproval",
+      method: "addRule",
+      invocation: { kind: "direct" },
+      parameters: [
+        {
+          name: "request",
+          wire: "request",
+          source: "json",
+          codec: {
+            mode: "strict",
+            typeSymbol: "dsh-agent-approval#AgentApprovalAddRuleRequest",
+            schema: _agentApproval_addRule_parameter_0$schema,
+          },
+        },
+      ],
+      result: {
+        mode: "strict",
+        typeSymbol: "dsh-agent-approval#AgentApprovalRulesResult",
+        schema: addRuleResultSchema,
+      },
+      sourceLocation: { file: "index.js", line: 1, column: 1 },
+    },
+    {
+      id: "dsh-agent-approval#agentApproval/removeRule",
+      service: "agentApproval",
+      namespace: "agentApproval",
+      method: "removeRule",
+      invocation: { kind: "direct" },
+      parameters: [
+        {
+          name: "request",
+          wire: "request",
+          source: "json",
+          codec: {
+            mode: "strict",
+            typeSymbol: "dsh-agent-approval#AgentApprovalRemoveRuleRequest",
+            schema: _agentApproval_removeRule_parameter_0$schema,
+          },
+        },
+      ],
+      result: {
+        mode: "strict",
+        typeSymbol: "dsh-agent-approval#AgentApprovalRulesResult",
+        schema: removeRuleResultSchema,
+      },
+      sourceLocation: { file: "index.js", line: 1, column: 1 },
+    },
+    {
       id: "dsh-agent-approval#agentApproval/clearRecords",
       service: "agentApproval",
       namespace: "agentApproval",
@@ -288,7 +377,7 @@ export const TYPERT = {
             signature: "@Remote('getState') async getState(): Promise<AgentApprovalStateResult>",
             summary: "Snapshot for the Settings page and the composer toggle.",
             jsDoc:
-              "/**\n * Return the judge model route, timeout, enabled session ids, and the latest audit records.\n * @returns success or a business failure.\n */",
+              "/**\n * Return the judge model route, timeout, enabled sessions (id + session-list title + workspace cwd), and the latest audit records.\n * @returns success or a business failure.\n */",
           },
           {
             kind: "method",
@@ -313,6 +402,22 @@ export const TYPERT = {
             summary: "Toggle the mode for one live session (pin/restore the permission knobs).",
             jsDoc:
               "/**\n * Enable (workspace-write base + judged escalations) or disable (restore prior knobs) for one live session.\n * @param request - { sessionId, on }.\n * @returns a human-readable message, or session-not-live.\n */",
+          },
+          {
+            kind: "method",
+            name: "addRule",
+            signature: "@Remote('addRule') async addRule(request: AgentApprovalAddRuleRequest): Promise<AgentApprovalRulesResult>",
+            summary: "Add a deterministic allow/deny rule judged before the model (persisted).",
+            jsDoc:
+              "/**\n * Add one rule: tool = exact name or \"*\"; match = \"\" (every call), substring, or /regex/flags over the raw arguments JSON. Deny is evaluated before allow.\n * @param request - { effect, tool, match, note }.\n * @returns the full rule table.\n */",
+          },
+          {
+            kind: "method",
+            name: "removeRule",
+            signature: "@Remote('removeRule') async removeRule(request: AgentApprovalRemoveRuleRequest): Promise<AgentApprovalRulesResult>",
+            summary: "Remove one rule by id (persisted).",
+            jsDoc:
+              "/**\n * Remove one rule by id.\n * @param request - { id }.\n * @returns the full rule table.\n */",
           },
           {
             kind: "method",
@@ -343,9 +448,24 @@ export const TYPERT = {
               "export interface AgentApprovalModelRoute {\n    readonly provider: string;\n    readonly model: string;\n}",
           },
           {
+            name: "AgentApprovalEnabledSession",
+            declaration:
+              "export interface AgentApprovalEnabledSession {\n    readonly id: string;\n    readonly title: string;\n    readonly cwd: string;\n}",
+          },
+          {
+            name: "AgentApprovalRule",
+            declaration:
+              "export interface AgentApprovalRule {\n    readonly id: string;\n    readonly effect: 'allow' | 'deny';\n    readonly tool: string;\n    readonly match: string;\n    readonly note: string;\n    readonly createdAt: string;\n}",
+          },
+          {
+            name: "AgentApprovalRulesResult",
+            declaration:
+              "export type AgentApprovalRulesResult = { ok: true; value: { readonly rules: readonly AgentApprovalRule[] } } | { ok: false; error: { code: string; message?: string } };",
+          },
+          {
             name: "AgentApprovalStateValue",
             declaration:
-              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly string[];\n    readonly records: readonly AgentApprovalRecord[];\n}",
+              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n    readonly records: readonly AgentApprovalRecord[];\n}",
           },
           {
             name: "AgentApprovalStateResult",

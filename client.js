@@ -6,7 +6,8 @@
  *   1. A "Agent 审批" page in the Settings panel (`settings.section`):
  *      - approval model picker (provider + model, or the harness default),
  *      - judge timeout setting (fail-closed),
- *      - the list of sessions with the mode enabled,
+ *      - the list of sessions with the mode enabled (session-list title +
+ *        workspace, so each chip is recognizable),
  *      - the latest approval audit records (verdict, risk, model, duration,
  *        rationale; hover for the full rationale + tool arguments).
  *
@@ -38,7 +39,9 @@ window.__ModuleLoader__.load({
 .aapr-muted{color:var(--dsw-alias-label-secondary);line-height:1.5}
 .aapr-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .aapr-select,.aapr-input{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:4px 8px;font-size:12px;max-width:340px}
-.aapr-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:2px 10px;background:var(--dsw-alias-bg-layer-2);font-family:monospace}
+.aapr-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:2px 10px;background:var(--dsw-alias-bg-layer-2);max-width:100%}
+.aapr-chip-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px}
+.aapr-chip-id{color:var(--dsw-alias-label-secondary);font-family:monospace;font-size:11px}
 .aapr-chip button{background:none;border:none;color:var(--dsw-alias-state-error-primary);cursor:pointer;font-size:12px;padding:0 2px}
 .aapr-wrap{overflow-x:auto}
 .aapr-table{width:100%;border-collapse:collapse;font-size:12px}
@@ -47,6 +50,12 @@ window.__ModuleLoader__.load({
 .aapr-cell{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:normal}
 .aapr-ok{color:var(--dsw-alias-state-success-primary);white-space:nowrap}
 .aapr-no{color:var(--dsw-alias-state-error-primary);white-space:nowrap}
+.aapr-input-wide{flex:1;min-width:220px;max-width:none}
+.aapr-rule-match{font-family:monospace;font-size:11px;color:var(--dsw-alias-label-secondary)}
+.aapr-rule-del,.aapr-whitelist{background:none;border:none;cursor:pointer;font-size:12px;padding:0 2px}
+.aapr-rule-del{color:var(--dsw-alias-state-error-primary)}
+.aapr-whitelist{color:var(--dsw-alias-label-secondary)}
+.aapr-whitelist:hover{color:var(--dsw-alias-label-primary)}
 
 /* Settings nav icon: DSH 0.1.x settings.section only projects id/order/
    label, and the settings shell paints a generic gear for every external
@@ -250,6 +259,24 @@ window.__ModuleLoader__.load({
           result: result("dsh-agent-approval#AgentApprovalToggleResult"),
         },
         {
+          id: "dsh-agent-approval#agentApproval/addRule",
+          service: "agentApproval",
+          namespace: "agentApproval",
+          method: "addRule",
+          invocation: { kind: "direct" },
+          parameters: param("dsh-agent-approval#AgentApprovalAddRuleRequest"),
+          result: result("dsh-agent-approval#AgentApprovalRulesResult"),
+        },
+        {
+          id: "dsh-agent-approval#agentApproval/removeRule",
+          service: "agentApproval",
+          namespace: "agentApproval",
+          method: "removeRule",
+          invocation: { kind: "direct" },
+          parameters: param("dsh-agent-approval#AgentApprovalRemoveRuleRequest"),
+          result: result("dsh-agent-approval#AgentApprovalRulesResult"),
+        },
+        {
           id: "dsh-agent-approval#agentApproval/clearRecords",
           service: "agentApproval",
           namespace: "agentApproval",
@@ -360,6 +387,11 @@ window.__ModuleLoader__.load({
         const noteSlot = React.useState("");
         const note = noteSlot[0];
         const setNote = noteSlot[1];
+        // Rule-add form drafts (the table itself comes from getState).
+        const ruleEffectSlot = React.useState("allow");
+        const ruleToolSlot = React.useState("");
+        const ruleMatchSlot = React.useState("");
+        const ruleNoteSlot = React.useState("");
 
         const refresh = () => {
           remote
@@ -423,6 +455,58 @@ window.__ModuleLoader__.load({
             .clearRecords()
             .then(refresh)
             .catch(() => {});
+        };
+
+        const ruleEffect = ruleEffectSlot[0];
+        const ruleTool = ruleToolSlot[0];
+        const ruleMatch = ruleMatchSlot[0];
+        const ruleNote = ruleNoteSlot[0];
+        const setRuleEffect = ruleEffectSlot[1];
+        const setRuleTool = ruleToolSlot[1];
+        const setRuleMatch = ruleMatchSlot[1];
+        const setRuleNote = ruleNoteSlot[1];
+        const rules = state !== null && Array.isArray(state.rules) ? state.rules : [];
+
+        const addRule = (draft) => {
+          remote
+            .addRule(draft)
+            .then((res) => {
+              const v = pick(res);
+              setState((prev) => (prev ? Object.assign({}, prev, { rules: v.rules }) : prev));
+              setRuleTool("");
+              setRuleMatch("");
+              setRuleNote("");
+              setNote("规则已保存（deny 优先于 allow；命中即不再经过审批模型）");
+            })
+            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+        };
+        const submitRule = () => {
+          if (ruleTool.trim() === "") {
+            setNote("工具名必填（* 匹配所有工具）");
+            return;
+          }
+          addRule({ effect: ruleEffect, tool: ruleTool.trim(), match: ruleMatch, note: ruleNote.trim() });
+        };
+        const removeRule = (id) => {
+          remote
+            .removeRule({ id: id })
+            .then((res) => {
+              const v = pick(res);
+              setState((prev) => (prev ? Object.assign({}, prev, { rules: v.rules }) : prev));
+            })
+            .catch(() => {});
+        };
+        // One-click whitelist from an audit row: the recorded args are a
+        // PREFIX of the real arguments JSON (the Host truncates at 2000
+        // chars), so stripping the truncation marker keeps a valid substring.
+        const whitelistRecord = (r) => {
+          const args = String(r.args || "").replace(/…\[truncated\]$/, "");
+          addRule({
+            effect: "allow",
+            tool: String(r.toolName),
+            match: args,
+            note: "来自审计 " + fmtTime(r.at),
+          });
         };
 
         const providerOptions = [{ id: "", name: "默认（Harness 默认模型）" }].concat(
@@ -529,15 +613,81 @@ window.__ModuleLoader__.load({
                 : h(
                     "div",
                     { className: "aapr-row" },
-                    state.enabledSessions.map((sid) =>
-                      h(
+                    state.enabledSessions.map((raw) => {
+                      // New hosts send { id, title, cwd }; a not-yet-restarted
+                      // old host still sends bare id strings — render both.
+                      const info =
+                        typeof raw === "string" ? { id: raw, title: "", cwd: "" } : raw;
+                      const sid = String(info.id);
+                      const title =
+                        typeof info.title === "string" && info.title !== "" ? info.title : "";
+                      const cwd = typeof info.cwd === "string" && info.cwd !== "" ? info.cwd : "";
+                      const tip =
+                        "会话 ID：" + sid + (cwd !== "" ? "\n工作区：" + cwd : "");
+                      return h(
                         "span",
-                        { key: sid, className: "aapr-chip" },
-                        String(sid).slice(0, 8),
-                        h("button", { onClick: () => disableSession(sid), title: "关闭该会话的 Agent 审批" }, "✕"),
-                      ),
-                    ),
+                        { key: sid, className: "aapr-chip", title: tip },
+                        h(
+                          "span",
+                          { className: "aapr-chip-title" },
+                          title !== "" ? title : sid.slice(0, 8),
+                        ),
+                        title !== ""
+                          ? h("span", { className: "aapr-chip-id" }, sid.slice(0, 8))
+                          : null,
+                        h(
+                          "button",
+                          { onClick: () => disableSession(sid), title: "关闭该会话的 Agent 审批" },
+                          "✕",
+                        ),
+                      );
+                    }),
                   ),
+          ),
+          h(
+            "div",
+            { className: "aapr-card" },
+            h("h3", null, "放行 / 拒绝规则"),
+            h(
+              "div",
+              { className: "aapr-muted" },
+              "命中规则的提权不再经过审批模型：拒绝规则直接拒、放行规则直接过（拒绝优先于放行）。match 留空 = 该工具全部调用；否则是参数 JSON 的子串，或 /正则/flags 形式。另：模型批准后，同一会话内参数完全相同的再次提权直接放行（会话内信任，不跨会话、不泛化）。",
+            ),
+            rules.length === 0
+              ? h("div", { className: "aapr-muted" }, "暂无规则。")
+              : rules.map((rule) =>
+                  h(
+                    "div",
+                    { key: rule.id, className: "aapr-row" },
+                    h(
+                      "span",
+                      { className: rule.effect === "allow" ? "aapr-ok" : "aapr-no" },
+                      rule.effect === "allow" ? "放行" : "拒绝",
+                    ),
+                    h("span", { className: "aapr-chip-id" }, String(rule.tool)),
+                    rule.match !== ""
+                      ? h("span", { className: "aapr-rule-match", title: String(rule.match) }, truncText(rule.match, 60))
+                      : h("span", { className: "aapr-muted" }, "（全部调用）"),
+                    rule.note !== ""
+                      ? h("span", { className: "aapr-muted" }, truncText(rule.note, 40))
+                      : null,
+                    h("button", { className: "aapr-rule-del", onClick: () => removeRule(rule.id), title: "删除该规则" }, "✕"),
+                  ),
+                ),
+            h(
+              "div",
+              { className: "aapr-row" },
+              h(
+                "select",
+                { className: "aapr-select", value: ruleEffect, onChange: (e) => setRuleEffect(e.target.value) },
+                h("option", { value: "allow" }, "放行"),
+                h("option", { value: "deny" }, "拒绝"),
+              ),
+              h("input", { className: "aapr-input", placeholder: "工具名（* = 所有工具）", value: ruleTool, onChange: (e) => setRuleTool(e.target.value) }),
+              h("input", { className: "aapr-input aapr-input-wide", placeholder: "match：留空 = 全部；子串或 /正则/flags", value: ruleMatch, onChange: (e) => setRuleMatch(e.target.value) }),
+              h("input", { className: "aapr-input", placeholder: "备注（可选）", value: ruleNote, onChange: (e) => setRuleNote(e.target.value) }),
+              h(ui.Button, { variant: "primary", size: "sm", onClick: submitRule }, "添加"),
+            ),
           ),
           h(
             "div",
@@ -562,7 +712,7 @@ window.__ModuleLoader__.load({
                   h(
                     "tr",
                     null,
-                    ["时间", "会话", "工具", "结果", "风险", "模型", "耗时", "审批理由"].map((t) => h("th", { key: t }, t)),
+                    ["时间", "会话", "工具", "结果", "风险", "模型", "耗时", "审批理由", "规则"].map((t) => h("th", { key: t }, t)),
                   ),
                 ),
                 h(
@@ -591,16 +741,31 @@ window.__ModuleLoader__.load({
                             },
                             truncText(r.rationale, 110),
                           ),
+                          h(
+                            "td",
+                            null,
+                            r.outcome === "allowed-once" && r.args && r.model !== "rule"
+                              ? h(
+                                  "button",
+                                  {
+                                    className: "aapr-whitelist",
+                                    onClick: () => whitelistRecord(r),
+                                    title: "把该操作存为放行规则（工具 + 参数子串）：今后直接放行，不再经过审批模型",
+                                  },
+                                  "加白",
+                                )
+                              : null,
+                          ),
                         ),
                       )
-                    : h("tr", null, h("td", { colSpan: 8 }, h("span", { className: "aapr-muted" }, "暂无记录"))),
+                    : h("tr", null, h("td", { colSpan: 9 }, h("span", { className: "aapr-muted" }, "暂无记录"))),
                 ),
               ),
             ),
             h(
               "div",
               { className: "aapr-muted" },
-              "悬停“审批理由”可查看完整理由与工具参数；“审批会话”前缀可在会话列表中找到审批 Agent 的完整会话记录。",
+              "悬停“审批理由”可查看完整理由与工具参数；“审批会话”前缀可在会话列表中找到审批 Agent 的完整会话记录。「加白」把一条已批准的操作存为放行规则（模型列显示 rule/trust 的行分别来自规则命中与会话内信任缓存）。",
             ),
           ),
         );
