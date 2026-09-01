@@ -115,6 +115,7 @@ const run = await this.ctx.subagents.start("spawn", {
 
 - 内存环形数组，上限 200 条，`getState()` 返回倒序最近 50 条；**每条同时追加落盘** `<DSH_HOME>/agent-approval/records.jsonl`（JSONL，一行一条），启动时读回最近 200 条并把文件压实回上限（防无限增长），`clearRecords` 同步清空文件。每条：时间、会话（短 id）、工具、结论、风险等级、审批模型、耗时、理由（截断 600）、`childSessionId`（审批 Agent 自己的会话短 id——在会话列表里能找到完整推理记录）。
 - **必须整形状构造**（`typert.host.js` 的 result schema 是 strict）：每个字段都在、类型正确，数组用 `.readonly()`。新增字段要同步改三处（index.js 构造、typert schema、client 展示）。
+- **短 id 切片必须跳过 `session-` 前缀**：DSH 的 sessionId 是 `session-${randomUUID()}` 格式（见 `dsh-host-apiproxy/lib/index.js` 的 `session create`：`session-${randomUUID()}`），前缀正好 8 字符，`String(id).slice(0, 8)` 只会切到那个无意义的前缀——历史 bug：所有审计行的 `sessionId` 全是 `"session-"`，已开启会话 chip 显示也是。Host 的 `shortId()` / Client 的 `shortSessionId()` 都必须先 `id.startsWith("session-")` 剥掉前缀再取 8 字符；`childSessionId` 来自 `run.id = randomUUID()`（无前缀），同一函数兼容。**不要**改回 naive slice——会再次触发。
 
 ### 7. Client 半：bundle 格式
 

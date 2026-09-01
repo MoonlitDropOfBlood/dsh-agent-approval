@@ -353,6 +353,19 @@ window.__ModuleLoader__.load({
         return typeof s === "string" && s.length > n ? s.slice(0, n) + "…" : s || "";
       }
 
+      /**
+        Mirror of Host `shortId()`: DSH prefixes session ids with the literal
+        `"session-"` before the UUID, so a naive `slice(0, 8)` shows nothing
+        but `"session-"`. Strip the known prefix so the chip displays 8 chars
+        of the UUID proper. Kept here too because the bundle has no shared
+        module with the Host half.
+      */
+      function shortSessionId(id) {
+        const s = String(id);
+        const tail = s.indexOf("session-") === 0 ? s.slice("session-".length) : s;
+        return tail.slice(0, 8);
+      }
+
       function fmtTime(iso) {
         try {
           const d = new Date(iso);
@@ -624,16 +637,17 @@ window.__ModuleLoader__.load({
                       const cwd = typeof info.cwd === "string" && info.cwd !== "" ? info.cwd : "";
                       const tip =
                         "会话 ID：" + sid + (cwd !== "" ? "\n工作区：" + cwd : "");
+                      const sidShort = shortSessionId(sid);
                       return h(
                         "span",
                         { key: sid, className: "aapr-chip", title: tip },
                         h(
                           "span",
                           { className: "aapr-chip-title" },
-                          title !== "" ? title : sid.slice(0, 8),
+                          title !== "" ? title : sidShort,
                         ),
                         title !== ""
-                          ? h("span", { className: "aapr-chip-id" }, sid.slice(0, 8))
+                          ? h("span", { className: "aapr-chip-id" }, sidShort)
                           : null,
                         h(
                           "button",

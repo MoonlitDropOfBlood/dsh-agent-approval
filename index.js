@@ -145,9 +145,22 @@ function trunc(value, n) {
   return value.length > n ? value.slice(0, n) + "…[truncated]" : value;
 }
 
-/** First 8 chars of a session id (display form in records and chips). */
+/**
+ * First 8 chars of a session / run id (display form in records and chips).
+ * DSH prefixes session ids with the literal `"session-"` before the UUID
+ * (see `@deepseek-ai/dsh-host-apiproxy` `session create` and
+ * `@deepseek-ai/dsh-headless` SessionId(`session-${randomUUID()}`)); a naive
+ * `slice(0, 8)` lands on that meaningless 8-char prefix and every audit row
+ * shows nothing but `"session-"`. Strip the known prefix before truncating
+ * so the displayed fragment comes from the UUID proper (where the real
+ * discriminator lives); id shapes without the prefix (subagent `run.id`
+ * = raw `randomUUID()`) are unaffected.
+ */
+const SESSION_ID_PREFIX = "session-";
 function shortId(id) {
-  return String(id).slice(0, 8);
+  const s = String(id);
+  const tail = s.startsWith(SESSION_ID_PREFIX) ? s.slice(SESSION_ID_PREFIX.length) : s;
+  return tail.slice(0, 8);
 }
 
 /** Best-effort error text. */
