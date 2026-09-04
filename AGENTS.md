@@ -140,7 +140,8 @@ const run = await this.ctx.subagents.start("spawn", {
    - 选中其他预设 → 只删 bookkeeping，**不恢复旋钮**（预设服务马上写自己的旋钮，恢复会打架）。
 5. **跨重启存活**：`agent/created` 监听在（重）发布时折叠日志——`permission/preset` 折出 `agent-approval` 就重新启用。spawn 的审批员子会话不带 preset 事件（无 seed），不会递归重启用；fork 子会话 seed 里可能带父级的 preset 事件 → 会继承该模式（有意语义：模式跟随会话的工作；"later child switches win" 是官方允许的后来者覆盖）。
 6. **防御**：`_presetRegistered()` 先确认表里有 `agent-approval` 才追加 preset 事件——没装覆盖行时，追加会被会话不变量（unknown preset）直接抛错。
-7. （已随 composer chip 的移除而作废）曾有的 chip 每 10s 轮询一次 enabled 状态；若未来重加 chip，注意 InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询。
+7. **宿主 Session API 兼容（v1.4.2 修复的真实故障）**：DSH 0.1.2-rc.1 **删除了 `session.events` 公开快照数组**，改为 `snapshotEvents(from?, to?)` / `eventAt(seq)` / `seq`。插件所有日志折叠（`_lastKnob` / `_callArgsOf` / `_recentUserContext`）必须走 `_eventsOf(session)`（新 API 优先，legacy 数组兜底）。0.1.1→0.1.2-rc.1 升级后的症状极具欺骗性：监听器 try/catch 把 TypeError 吞掉，`_enableCore` 静默失败，没有任何会话能进入 `_enabled`，于是每个提权都 `next()` 落回人工弹窗——看起来"插件在运行但就是不审批"。**改任何读日志的代码前先确认没用裸 `session.events`。**
+8. （已随 composer chip 的移除而作废）曾有的 chip 每 10s 轮询一次 enabled 状态；若未来重加 chip，注意 InputZone 的 ConversationSnapshot **没有** projections 字段，读不了 `permissions` 投影，只能轮询。
 
 ### 9. 标准安装 = dsh bundle（package.json 声明 + 包内 cordis.patch.yml）
 

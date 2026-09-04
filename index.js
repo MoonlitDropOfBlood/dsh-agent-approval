@@ -338,9 +338,26 @@ export class AgentApprovalService extends TypertRemoteService {
 
   // ---- knob plumbing --------------------------------------------------------
 
+  /**
+   * The session's durable events as a plain readonly array. DSH 0.1.2-rc.1
+   * removed the public `session.events` snapshot array in favor of
+   * `snapshotEvents(from?, to?)` / `eventAt(seq)` / `seq` — reading the old
+   * field yields undefined and every fold below threw TypeError, which the
+   * listeners' try/catch swallowed, so no session could ever enter `_enabled`
+   * (every escalation fell through to the human answerer). Prefer the new
+   * accessor; fall back to the legacy array on 0.1.1.
+   */
+  _eventsOf(session) {
+    if (session && typeof session.snapshotEvents === "function") {
+      return session.snapshotEvents();
+    }
+    const legacy = session ? session.events : undefined;
+    return Array.isArray(legacy) ? legacy : [];
+  }
+
   /** Last `sandbox/mode` / `approval/policy` value in the session log fold. */
   _lastKnob(session, type, field) {
-    const events = session.events;
+    const events = this._eventsOf(session);
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (e.type === type) return e.data[field];
@@ -683,7 +700,7 @@ export class AgentApprovalService extends TypertRemoteService {
   /** Read the exact tool-call arguments JSON from the session log by callId. */
   _callArgsOf(session, callId) {
     if (callId === undefined) return undefined;
-    const events = session.events;
+    const events = this._eventsOf(session);
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (e.type === "tool/call" && e.data.callId === callId) return e.data.arguments;
@@ -701,7 +718,7 @@ export class AgentApprovalService extends TypertRemoteService {
    * the requesting agent phrased its justification.
    */
   _recentUserContext(session) {
-    const events = session.events;
+    const events = this._eventsOf(session);
     let first = "";
     const last = []; // chronological, capped at 3
     for (let i = 0; i < events.length; i++) {
