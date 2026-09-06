@@ -26,7 +26,7 @@
 | ⛔ 风险即拒绝 | 破坏性 / 不可逆 / 越界（含修改操作系统或其他应用数据）/ 理由与实际命令不符 → 直接 `reject`；仅"安全、可逆、与任务相符、理由诚实"才 `approve`——项目自身的安装/部署脚本写其文档指定路径属任务所需 |
 | 🔒 Fail-closed | 审批 Agent 启动失败、超时（可配 30s–600s）、结果不合法 → 一律按拒绝处理，绝不静默放行 |
 | ⚙️ 审批模型可配置 | 设置页选择 Provider + Model，不选则固定用 **Harness 默认模型**（不跟随请求会话，口径稳定）；选择与超时**持久保存**，重启不丢 |
-| 📋 审计记录 | 设置页查看最近审批：结论 / 风险等级 / 模型 / 耗时 / 理由；悬停看完整理由与**精确工具参数**；审批 Agent 的会话 id 可回溯完整推理；记录**本地持久化**（重启保留最近 200 条） |
+| 📋 审计记录（随会话） | 会话窗口顶部的**「审批」标签页**（轨迹旁）查看本会话全部审批：结论 / 风险等级 / 模型 / 耗时 / 理由；悬停看完整理由与**精确工具参数**；审批 Agent 的会话 id 可回溯完整推理；已批准行可一键**「加白」**存为放行规则。记录存在**会话存储目录内的独立文件**——随会话恢复，删除会话即随之删除 |
 | 🔁 可逆开关 | 权限菜单「Agent 审批」预设、`/agent-approval on\|off` 命令两条等价路径；关闭时**恢复开启前的权限旋钮** |
 
 ## 工作原理
@@ -42,7 +42,7 @@
                     ├─ approve → allowed-once（该次放行）
                     ├─ reject  → rejected（风险操作，最终拒绝）
                     └─ 超时/故障/取消 → fail-closed（按拒绝处理）
-              └─ 记入审计（设置页可见）
+              └─ 记入审计（写入会话日志，「审批」标签页可见）
 ```
 
 - 审批 Agent 只能看到：workspace 路径、**最近的用户消息**（任务上下文）、工具名、提权理由、**精确的工具参数 JSON**（按 `callId` 从会话日志回查）。裁决看"操作 vs 用户任务"的客观对齐，不依赖理由措辞。
@@ -60,7 +60,7 @@
 dsh plugin --profile web add /path/to/dsh-agent-approval
 
 # 正式发布：从 GitHub Release tarball 安装
-dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.2.0/dsh-agent-approval-1.2.0.tgz
+dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.5.0/dsh-agent-approval-1.5.0.tgz
 ```
 
 重启 DSH 后：设置面板出现 **Agent 审批** 页；`/permission` 菜单出现第四项 **Agent 审批**。
@@ -76,8 +76,8 @@ dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-app
 
 1. **开启**：在 `/permission` 菜单选 **Agent 审批**，或输入 `/agent-approval on`。
 2. **自动裁决**：之后该会话里的提权请求（例如命令被沙箱拒绝后带 `sandbox_permissions` 的重试）不再弹窗，由审批 Agent 在后台裁决并放行/拒绝。
-3. **审计**：设置 → **Agent 审批** → 审批记录；悬停"审批理由"看完整理由与工具参数。
-4. **配置**：同页设置审批模型（不选则用 Harness 默认模型）与审批超时。
+3. **审计**：会话窗口顶部的**「审批」标签页**（轨迹旁）查看本会话的审批记录；悬停"审批理由"看完整理由与工具参数；已批准行可「加白」存为放行规则。记录存在会话存储目录内的独立文件，删除会话即随之删除；v1.4 的旧全局记录用 `node scripts/migrate-records.mjs` 一次性迁移（`--dry-run` 预览）。
+4. **配置**：设置 → **Agent 审批** 设置审批模型（不选则用 Harness 默认模型）、审批超时与放行/拒绝规则。
 5. **关闭**：菜单切回其他预设，或 `/agent-approval off`，恢复开启前的沙箱模式与审批策略。
 
 ## 目录结构

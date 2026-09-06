@@ -3,13 +3,19 @@
  *
  * Rendered by the DSH web shell via `window.__ModuleLoader__.load`. Adds:
  *
- *   1. A "Agent 审批" page in the Settings panel (`settings.section`):
- *      - approval model picker (provider + model, or the harness default),
- *      - judge timeout setting (fail-closed),
- *      - the list of sessions with the mode enabled (session-list title +
- *        workspace, so each chip is recognizable),
- *      - the latest approval audit records (verdict, risk, model, duration,
- *        rationale; hover for the full rationale + tool arguments).
+ *   1. An「审批」tab in the conversation window's view ring
+ *      (`conversation.view`, right next to 轨迹): the per-session approval
+ *      audit trail. The Host folds the records out of a sidecar file inside
+ *      the session's OWN persistence directory
+ *      (`<sessionDir>/agent-approval.jsonl`), so the audit follows the
+ *      session — restored with it after a restart, gone when the session is
+ *      deleted. Rows offer the one-click「加白」rule shortcut.
+ *
+ *   2. A "Agent 审批" page in the Settings panel (`settings.section`):
+ *      approval model picker (provider + model, or the harness default),
+ *      judge timeout setting (fail-closed), the list of sessions with the
+ *      mode enabled (session-list title + workspace), and the allow/deny
+ *      rule table.
  *
  * Session-level on/off lives in the /permission menu (the "Agent 审批"
  * preset, registered by the package's cordis.patch.yml bundle patch) and the
@@ -56,6 +62,16 @@ window.__ModuleLoader__.load({
 .aapr-rule-del{color:var(--dsw-alias-state-error-primary)}
 .aapr-whitelist{color:var(--dsw-alias-label-secondary)}
 .aapr-whitelist:hover{color:var(--dsw-alias-label-primary)}
+
+/* Conversation-window「审批」tab: fills the view area below the tab strip
+   with the same token family as the Settings cards, so the audit ledger
+   reads native beside 轨迹. */
+.aapr-view{height:100%;overflow:auto;padding:12px 16px 16px;color:var(--dsw-alias-label-primary);font-size:13px}
+.aapr-view-inner{display:flex;flex-direction:column;gap:10px;max-width:980px;margin:0 auto}
+.aapr-view-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.aapr-view-title{font-size:13px;font-weight:600;margin:0}
+.aapr-state-on{color:var(--dsw-alias-state-success-primary)}
+.aapr-state-off{color:var(--dsw-alias-label-secondary)}
 
 /* Settings nav icon: DSH 0.1.x settings.section only projects id/order/
    label, and the settings shell paints a generic gear for every external
@@ -277,13 +293,13 @@ window.__ModuleLoader__.load({
           result: result("dsh-agent-approval#AgentApprovalRulesResult"),
         },
         {
-          id: "dsh-agent-approval#agentApproval/clearRecords",
+          id: "dsh-agent-approval#agentApproval/sessionRecords",
           service: "agentApproval",
           namespace: "agentApproval",
-          method: "clearRecords",
+          method: "sessionRecords",
           invocation: { kind: "direct" },
-          parameters: [],
-          result: result("dsh-agent-approval#AgentApprovalClearRecordsResult"),
+          parameters: param("dsh-agent-approval#AgentApprovalSessionRecordsRequest"),
+          result: result("dsh-agent-approval#AgentApprovalSessionRecordsResult"),
         },
         {
           id: "dsh-agent-approval#agentApproval/directory",
@@ -463,12 +479,6 @@ window.__ModuleLoader__.load({
             .then(refresh)
             .catch(() => {});
         };
-        const clearRecords = () => {
-          remote
-            .clearRecords()
-            .then(refresh)
-            .catch(() => {});
-        };
 
         const ruleEffect = ruleEffectSlot[0];
         const ruleTool = ruleToolSlot[0];
@@ -509,18 +519,6 @@ window.__ModuleLoader__.load({
             })
             .catch(() => {});
         };
-        // One-click whitelist from an audit row: the recorded args are a
-        // PREFIX of the real arguments JSON (the Host truncates at 2000
-        // chars), so stripping the truncation marker keeps a valid substring.
-        const whitelistRecord = (r) => {
-          const args = String(r.args || "").replace(/…\[truncated\]$/, "");
-          addRule({
-            effect: "allow",
-            tool: String(r.toolName),
-            match: args,
-            note: "来自审计 " + fmtTime(r.at),
-          });
-        };
 
         const providerOptions = [{ id: "", name: "默认（Harness 默认模型）" }].concat(
           dir ? dir.providers : [],
@@ -548,8 +546,9 @@ window.__ModuleLoader__.load({
               { className: "aapr-muted" },
               "一种新的权限模式：以 workspace-write 为基线沙箱；当工具请求提权（更宽的沙箱）时，由一个独立的审批 Agent 评估风险——安全、可逆、与任务相符的操作自动批准，破坏性、不可逆、越界或理由不符的操作直接拒绝。",
               h("br", null),
-              "在输入框 /permission 菜单选择「Agent 审批」预设，或执行命令 /agent-approval on|off 为会话开启；审批记录见下方审计。",
+              "在输入框 /permission 菜单选择「Agent 审批」预设，或执行命令 /agent-approval on|off 为会话开启；每个会话的审批审计记录在该会话窗口顶部的「审批」标签页（轨迹旁），随会话保存。",
             ),
+            note !== "" ? h("div", { className: "aapr-muted" }, note) : null,
           ),
           h(
             "div",
@@ -703,84 +702,164 @@ window.__ModuleLoader__.load({
               h(ui.Button, { variant: "primary", size: "sm", onClick: submitRule }, "添加"),
             ),
           ),
+        );
+      }
+
+      /**
+       * The conversation-window「审批」tab (`conversation.view`, next to
+       * 轨迹): this session's audit trail, folded by the Host out of the
+       * session's own sidecar storage. Rendered only while the tab is
+       * active, so the 10s poll costs nothing otherwise. Session-scoped
+       * slot: the runtime hands us the standard `useSession` hook; the
+       * snapshot's `sessionId` leaf is the only field we read.
+       */
+      function ApprovalAuditView(props) {
+        const useSession = props.useSession;
+        const session = useSession(function (s) { return s; });
+        const sessionId = session && session.sessionId ? String(session.sessionId) : "";
+
+        const stateSlot = React.useState(null); // { records, enabled } | null
+        const state = stateSlot[0];
+        const setState = stateSlot[1];
+        const noteSlot = React.useState("");
+        const note = noteSlot[0];
+        const setNote = noteSlot[1];
+        const tickSlot = React.useState(0); // manual-refresh counter
+        const tick = tickSlot[0];
+        const setTick = tickSlot[1];
+
+        React.useEffect(() => {
+          if (sessionId === "") return undefined;
+          let alive = true;
+          const load = () => {
+            if (typeof remote.sessionRecords !== "function") {
+              if (alive) setNote("Host 半未更新（缺少 sessionRecords）：请重装本插件并重启 DSH。");
+              return;
+            }
+            remote
+              .sessionRecords({ sessionId: sessionId })
+              .then((res) => {
+                if (alive) setState(pick(res));
+              })
+              .catch((e) => {
+                if (alive) setNote("无法读取审批记录：" + (e && e.message ? e.message : String(e)));
+              });
+          };
+          load();
+          const timer = setInterval(load, 10000);
+          return () => {
+            alive = false;
+            clearInterval(timer);
+          };
+        }, [sessionId, tick]);
+
+        // One-click whitelist from an audit row: the recorded args are a
+        // PREFIX of the real arguments JSON (the Host truncates at 2000
+        // chars), so stripping the truncation marker keeps a valid substring.
+        const whitelistRecord = (r) => {
+          const args = String(r.args || "").replace(/…\[truncated\]$/, "");
+          remote
+            .addRule({
+              effect: "allow",
+              tool: String(r.toolName),
+              match: args,
+              note: "来自审批审计 " + fmtTime(r.at),
+            })
+            .then(() => setNote("已加白：今后该操作直接放行，不再经过审批模型。"))
+            .catch((e) => setNote("加白失败：" + (e && e.message ? e.message : String(e))));
+        };
+
+        const records = state !== null && Array.isArray(state.records) ? state.records : [];
+        // 倒序展示（最新在最上）；Host 仍按时间正序返回，顺序属于视图层。
+        const ordered = records.slice().reverse();
+        const enabled = state !== null ? !!state.enabled : null;
+
+        return h(
+          "div",
+          { className: "aapr-view" },
           h(
             "div",
-            { className: "aapr-card" },
-            h("h3", null, "审批记录（最近 50 条，本地持久化保留 200 条，重启不丢）"),
+            { className: "aapr-view-inner" },
             h(
               "div",
-              { className: "aapr-row" },
-              h(ui.Button, { variant: "ghost", size: "sm", onClick: refresh }, "刷新"),
-              h(ui.Button, { variant: "ghost", size: "sm", onClick: clearRecords }, "清空记录"),
+              { className: "aapr-view-head" },
+              h("h3", { className: "aapr-view-title" }, "审批审计（本会话）"),
+              enabled === true
+                ? h("span", { className: "aapr-state-on" }, "● Agent 审批已开启")
+                : enabled === false
+                  ? h("span", { className: "aapr-state-off" }, "○ Agent 审批未开启")
+                  : null,
+              h(ui.Button, { variant: "ghost", size: "sm", onClick: () => setTick(tick + 1) }, "刷新"),
               note !== "" ? h("span", { className: "aapr-muted" }, note) : null,
             ),
             h(
               "div",
-              { className: "aapr-wrap" },
-              h(
-                "table",
-                { className: "aapr-table" },
-                h(
-                  "thead",
-                  null,
-                  h(
-                    "tr",
-                    null,
-                    ["时间", "会话", "工具", "结果", "风险", "模型", "耗时", "审批理由", "规则"].map((t) => h("th", { key: t }, t)),
-                  ),
-                ),
-                h(
-                  "tbody",
-                  null,
-                  state !== null && state.records
-                    ? state.records.map((r, i) =>
+              { className: "aapr-muted" },
+              "审批结论随会话保存（会话目录内的独立记录文件）：随会话恢复，删除会话即随之删除，最新记录在最上。悬停「审批理由」可查看完整理由与工具参数；「审批会话」前缀可在会话列表中找到审批 Agent 的完整会话记录。",
+            ),
+            sessionId === ""
+              ? h("div", { className: "aapr-muted" }, "当前没有活动会话。")
+              : records.length === 0
+                ? h("div", { className: "aapr-muted" }, "本会话暂无审批记录。")
+                : h(
+                    "div",
+                    { className: "aapr-wrap" },
+                    h(
+                      "table",
+                      { className: "aapr-table" },
+                      h(
+                        "thead",
+                        null,
                         h(
                           "tr",
-                          { key: String(i) + "-" + String(r.at) },
-                          h("td", null, fmtTime(r.at)),
-                          h("td", null, String(r.sessionId)),
-                          h("td", null, String(r.toolName)),
-                          h("td", { className: r.outcome === "allowed-once" ? "aapr-ok" : "aapr-no" }, OUTCOME_LABEL[r.outcome] || String(r.outcome)),
-                          h("td", null, RISK_LABEL[r.riskLevel] || String(r.riskLevel || "-")),
-                          h("td", null, String(r.model)),
-                          h("td", null, String(r.durationMs) + "ms"),
+                          null,
+                          ["时间", "工具", "结果", "风险", "模型", "耗时", "审批理由", "规则"].map((t) => h("th", { key: t }, t)),
+                        ),
+                      ),
+                      h(
+                        "tbody",
+                        null,
+                        ordered.map((r, i) =>
                           h(
-                            "td",
-                            {
-                              className: "aapr-cell",
-                              title:
-                                (r.rationale || "") +
-                                (r.args ? "\n\n工具参数：" + r.args : "") +
-                                (r.childSessionId ? "\n\n审批会话：" + r.childSessionId : ""),
-                            },
-                            truncText(r.rationale, 110),
-                          ),
-                          h(
-                            "td",
-                            null,
-                            r.outcome === "allowed-once" && r.args && r.model !== "rule"
-                              ? h(
-                                  "button",
-                                  {
-                                    className: "aapr-whitelist",
-                                    onClick: () => whitelistRecord(r),
-                                    title: "把该操作存为放行规则（工具 + 参数子串）：今后直接放行，不再经过审批模型",
-                                  },
-                                  "加白",
-                                )
-                              : null,
+                            "tr",
+                            { key: String(r.at) + "-" + String(i) },
+                            h("td", null, fmtTime(r.at)),
+                            h("td", null, String(r.toolName)),
+                            h("td", { className: r.outcome === "allowed-once" ? "aapr-ok" : "aapr-no" }, OUTCOME_LABEL[r.outcome] || String(r.outcome)),
+                            h("td", null, RISK_LABEL[r.riskLevel] || String(r.riskLevel || "-")),
+                            h("td", null, String(r.model)),
+                            h("td", null, String(r.durationMs) + "ms"),
+                            h(
+                              "td",
+                              {
+                                className: "aapr-cell",
+                                title:
+                                  (r.rationale || "") +
+                                  (r.args ? "\n\n工具参数：" + r.args : "") +
+                                  (r.childSessionId ? "\n\n审批会话：" + r.childSessionId : ""),
+                              },
+                              truncText(r.rationale, 110),
+                            ),
+                            h(
+                              "td",
+                              null,
+                              r.outcome === "allowed-once" && r.args && r.model !== "rule"
+                                ? h(
+                                    "button",
+                                    {
+                                      className: "aapr-whitelist",
+                                      onClick: () => whitelistRecord(r),
+                                      title: "把该操作存为放行规则（工具 + 参数子串）：今后直接放行，不再经过审批模型",
+                                    },
+                                    "加白",
+                                  )
+                                : null,
+                            ),
                           ),
                         ),
-                      )
-                    : h("tr", null, h("td", { colSpan: 9 }, h("span", { className: "aapr-muted" }, "暂无记录"))),
-                ),
-              ),
-            ),
-            h(
-              "div",
-              { className: "aapr-muted" },
-              "悬停“审批理由”可查看完整理由与工具参数；“审批会话”前缀可在会话列表中找到审批 Agent 的完整会话记录。「加白」把一条已批准的操作存为放行规则（模型列显示 rule/trust 的行分别来自规则命中与会话内信任缓存）。",
-            ),
+                      ),
+                    ),
+                  ),
           ),
         );
       }
@@ -790,6 +869,18 @@ window.__ModuleLoader__.load({
         ctx.slots.register(
           { name: "settings.section", id: "agent-approval", order: 30, label: () => SETTINGS_LABEL },
           AgentApprovalSection,
+        ),
+      );
+
+      // Conversation entry: the「审批」audit tab in the view ring, right
+      // beside 轨迹 (chat order 0, trajectory order 10, audit order 11).
+      // Session-scoped: renders per conversation with the session's own
+      // records; registration rides the slot ledger so plugin unload
+      // removes the tab.
+      ctx.slots.inject("conversation.view", () =>
+        ctx.slots.register(
+          { name: "conversation.view", id: "agent-approval-audit", order: 11, label: () => "审批" },
+          ApprovalAuditView,
         ),
       );
     }

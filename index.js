@@ -36,10 +36,18 @@
  *      cancellation maps to the fail-closed approval outcomes
  *      (`unavailable` / `cancelled`), never to a grant.
  *
- *   4. AUDIT      — every decision is recorded (memory ring + JSONL under
- *      DSH_HOME) and shown in the Settings page; the judge's own child
- *      session id is kept so the full reasoning trail can be inspected in
- *      the session list.
+ *   4. AUDIT      — every decision is appended to a SIDECAR file inside the
+ *      requesting session's OWN persistence directory
+ *      (`<sessionDir>/agent-approval.jsonl`, resolved via
+ *      `sessionPersistence.locate`), so the audit trail follows the session
+ *      exactly: it survives restarts with the session, disappears when the
+ *      session is deleted, and NEVER touches the durable event log — no
+ *      custom events written, none read (the log's strict event-type
+ *      vocabulary makes plugin-defined types unsafe, and per project ruling
+ *      session.jsonl.zstd carries zero plugin data). The conversation
+ *      window's「审批」tab (next to 轨迹) folds those records per session;
+ *      the judge's own child session id is kept so the full reasoning trail
+ *      can be inspected in the session list.
  *
  * Mount on the HOST plane (profile `cordis.patch.yml` insert row): the
  * approval waterfall listener must be unscoped to see every live agent, and
@@ -50,7 +58,7 @@ import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import { Service } from "@deepseek-ai/cordis";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // ---- constants --------------------------------------------------------------
 
@@ -66,16 +74,34 @@ const PRESET_NAME = "agent-approval";
 const DEFAULT_TIMEOUT_MS = 120000;
 const MIN_TIMEOUT_MS = 30000;
 const MAX_TIMEOUT_MS = 600000;
-/** In-memory audit ring size (the Settings page shows the latest 50). */
-const MAX_RECORDS = 200;
 /**
- * On-disk persistence: one JSON object per line in records.jsonl plus the
- * judge settings in config.json. Lives under DSH_HOME (same resolution as
- * the plugin's own README documents), outside any profile's node_modules so
- * reinstalls and upgrades never touch it.
+ * v1.5.1, tightened in v1.5.2: audit records live in a SIDECAR FILE inside
+ * the session's OWN persistence directory (`<sessionDir>/agent-approval.jsonl`,
+ * resolved via `sessionPersistence.locate(header)`), so they still follow the
+ * session exactly — restored/kept with it, gone when the session directory is
+ * deleted. The durable event log (session.jsonl.zstd) is NEVER read for
+ * records and NEVER written by this plugin: writing custom event types into
+ * the log (v1.5.0's approach) is NOT viable — the persistence read path
+ * refuses a whole log containing an event type outside
+ * `KNOWN_SESSION_EVENT_TYPES` unless the envelope carries `ignorable: true`,
+ * and the live-session writer `session.append()` cannot set that marker —
+ * the first judged escalation made the session unresumable (2026-09-06, two
+ * poisoned log events repaired in place). Per the final ruling: the log
+ * carries ZERO plugin-defined data, and the audit tab reads the sidecar
+ * only. A handful of ignorable-marked v1.5.0-era record events remain in one
+ * historical log as inert, load-verified history; physically deleting them
+ * would require whole-log seq renumbering and is not worth the corruption
+ * risk.
+ */
+/** The sidecar file name inside a session's persistence directory. */
+const RECORDS_SIDECAR = "agent-approval.jsonl";
+/**
+ * On-disk persistence for the judge settings (model override + timeout +
+ * rules). Lives under DSH_HOME (same resolution as the plugin's own README
+ * documents), outside any profile's node_modules so reinstalls and upgrades
+ * never touch it.
  */
 const DATA_DIR = join(process.env.DSH_HOME || join(homedir(), ".dsh"), "agent-approval");
-const RECORDS_FILE = join(DATA_DIR, "records.jsonl");
 const CONFIG_FILE = join(DATA_DIR, "config.json");
 
 /**
@@ -203,7 +229,7 @@ export class AgentApprovalService extends TypertRemoteService {
     markRemoteMethod(this, "toggle", "toggle");
     markRemoteMethod(this, "addRule", "addRule");
     markRemoteMethod(this, "removeRule", "removeRule");
-    markRemoteMethod(this, "clearRecords", "clearRecords");
+    markRemoteMethod(this, "sessionRecords", "sessionRecords");
     markRemoteMethod(this, "directory", "directory");
 
     /** Judge model override; empty strings = use the harness default route. */
@@ -212,8 +238,6 @@ export class AgentApprovalService extends TypertRemoteService {
     this._timeoutMs = DEFAULT_TIMEOUT_MS;
     /** sessionId -> { prevSandbox?: string, prevApproval?: string } */
     this._enabled = new Map();
-    /** Audit records, oldest first, capped at MAX_RECORDS. */
-    this._records = [];
     /**
      * Deterministic rules judged BEFORE the model (persisted in config.json):
      * [{ id, effect: "allow"|"deny", tool, match, note, createdAt }]. A hit
@@ -571,11 +595,16 @@ export class AgentApprovalService extends TypertRemoteService {
 
   // ---- audit ----------------------------------------------------------------
 
-  /** Coerce one entry to the strict wire shape (typert result schema). */
-  _recordShape(entry) {
+  /**
+   * Coerce one entry to the strict wire shape (typert result schema). The
+   * session column is filled by the reader — the sidecar lives inside the
+   * session's own directory, so the id is implied but still stamped into
+   * every line to keep the file self-describing.
+   */
+  _recordShape(sessionId, entry) {
     return {
       at: String(entry.at),
-      sessionId: String(entry.sessionId),
+      sessionId: String(sessionId),
       toolName: String(entry.toolName),
       reason: String(entry.reason),
       args: String(entry.args),
@@ -588,29 +617,76 @@ export class AgentApprovalService extends TypertRemoteService {
     };
   }
 
-  /** Append one audit record (coerced), cap the ring, persist as JSONL. */
-  _record(entry) {
-    const shape = this._recordShape(entry);
-    this._records.push(shape);
-    if (this._records.length > MAX_RECORDS) {
-      this._records.splice(0, this._records.length - MAX_RECORDS);
+  /**
+   * Resolve the audit sidecar for one session: `agent-approval.jsonl` inside
+   * the session's persistence directory (same directory as the session's own
+   * durable log, via `sessionPersistence.locate(header)` — a pure path
+   * resolution that also works for live sessions). Falls back to a
+   * plugin-owned per-session file under DSH_HOME when the seam or the
+   * location is unavailable; the fallback keeps restart-safety at the cost
+   * of not being cleaned up when the session is deleted.
+   */
+  async _recordsFileOf(session) {
+    const persistence = this.ctx.get("sessionPersistence");
+    if (persistence !== undefined && typeof persistence.locate === "function") {
+      try {
+        const loc = persistence.locate(session.header);
+        if (loc && typeof loc.path === "string" && loc.path !== "") {
+          return join(dirname(loc.path), RECORDS_SIDECAR);
+        }
+      } catch (e) {
+        /* fall through to the plugin-owned fallback */
+      }
     }
-    mkdir(DATA_DIR, { recursive: true })
-      .then(() => appendFile(RECORDS_FILE, JSON.stringify(shape) + "\n", "utf8"))
-      .catch(() => {
-        /* persistence is best-effort; the in-memory ring still works */
-      });
+    return join(DATA_DIR, "records", `${String(session.id)}.jsonl`);
   }
 
-  /** Rewrite the whole records file from the in-memory ring (clear/compact). */
-  async _rewriteRecordsFile() {
+  /**
+   * Append one audit record to the session's SIDECAR file (see
+   * `_recordsFileOf`). Appending must never break the approval flow it
+   * audits: fire-and-forget with every failure swallowed.
+   */
+  _record(session, entry) {
+    const shape = this._recordShape(session.id, entry);
+    void (async () => {
+      try {
+        const file = await this._recordsFileOf(session);
+        await mkdir(dirname(file), { recursive: true });
+        await appendFile(file, JSON.stringify(shape) + "\n", "utf8");
+      } catch (e) {
+        /* audit is best-effort; the approval outcome still stands */
+      }
+    })();
+  }
+
+  /**
+   * Fold one session's audit records (chronological by `at`). The sidecar
+   * file is the ONLY source — the durable event log is never consulted
+   * (v1.5.2: zero custom data read from or written to session.jsonl.zstd).
+   * Never throws.
+   */
+  async _recordsOf(session) {
+    const out = [];
     try {
-      await mkdir(DATA_DIR, { recursive: true });
-      const body = this._records.map((r) => JSON.stringify(r)).join("\n");
-      await writeFile(RECORDS_FILE, body === "" ? "" : body + "\n", "utf8");
+      const file = await this._recordsFileOf(session);
+      const text = await readFile(file, "utf8");
+      for (const raw of text.split("\n")) {
+        const line = raw.trim();
+        if (line === "") continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && typeof parsed === "object" && typeof parsed.at === "string") {
+            out.push(this._recordShape(session.id, parsed));
+          }
+        } catch (e) {
+          /* skip the corrupt line */
+        }
+      }
     } catch (e) {
-      /* best-effort */
+      /* no sidecar yet */
     }
+    out.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    return out;
   }
 
   /** Persist the judge settings (model override + timeout + rules) to config.json. */
@@ -628,9 +704,9 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
-   * Load persisted settings + records at startup. Corrupt files/lines are
-   * skipped individually; the records file is compacted back down to the ring
-   * size so it cannot grow without bound. Never throws.
+   * Load persisted judge settings at startup (audit records need no loading —
+   * they live in the session logs and are folded per session on demand).
+   * Corrupt config is skipped; never throws.
    */
   async _loadPersisted() {
     try {
@@ -670,28 +746,6 @@ export class AgentApprovalService extends TypertRemoteService {
       }
     } catch (e) {
       /* first run or unreadable config — keep the defaults */
-    }
-    try {
-      const text = await readFile(RECORDS_FILE, "utf8");
-      const lines = text.split("\n");
-      const kept = [];
-      for (let i = lines.length - 1; i >= 0 && kept.length < MAX_RECORDS; i--) {
-        const line = lines[i].trim();
-        if (line === "") continue;
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed && typeof parsed === "object" && typeof parsed.at === "string") {
-            kept.push(this._recordShape(parsed));
-          }
-        } catch (e) {
-          /* skip the corrupt line */
-        }
-      }
-      kept.reverse();
-      this._records = kept;
-      if (lines.length > kept.length) await this._rewriteRecordsFile();
-    } catch (e) {
-      /* no records file yet */
     }
   }
 
@@ -811,9 +865,8 @@ export class AgentApprovalService extends TypertRemoteService {
       // A listener throw would make the whole waterfall fail closed with
       // 'unavailable' anyway; record what we can and resolve the same way.
       try {
-        this._record({
+        this._record(session, {
           at: new Date().toISOString(),
-          sessionId: shortId(session.id),
           toolName: String(req.toolName),
           reason: trunc(req.reason, 300),
           args: "",
@@ -870,7 +923,6 @@ export class AgentApprovalService extends TypertRemoteService {
     const toolName = String(req.toolName);
     const base = {
       at: startedAt,
-      sessionId: shortId(session.id),
       toolName: toolName,
       reason: trunc(req.reason, 300),
       args: trunc(argsRaw, 2000),
@@ -888,10 +940,10 @@ export class AgentApprovalService extends TypertRemoteService {
         (rule.note !== "" ? " — " + rule.note : "");
       base.durationMs = Date.now() - t0;
       if (rule.effect === "deny") {
-        this._record({ ...base, outcome: "rejected", riskLevel: "-", model: "rule", rationale: trunc(text, 600) });
+        this._record(session, { ...base, outcome: "rejected", riskLevel: "-", model: "rule", rationale: trunc(text, 600) });
         return "rejected";
       }
-      this._record({ ...base, outcome: "allowed-once", riskLevel: "-", model: "rule", rationale: trunc(text, 600) });
+      this._record(session, { ...base, outcome: "allowed-once", riskLevel: "-", model: "rule", rationale: trunc(text, 600) });
       return "allowed-once";
     }
 
@@ -901,7 +953,7 @@ export class AgentApprovalService extends TypertRemoteService {
     const trusted = this._trusted.get(session.id);
     if (trustKey !== undefined && trusted !== undefined && trusted.has(trustKey)) {
       base.durationMs = Date.now() - t0;
-      this._record({ ...base, outcome: "allowed-once", riskLevel: "-", model: "trust", rationale: "trusted: an identical operation was already approved in this session" });
+      this._record(session, { ...base, outcome: "allowed-once", riskLevel: "-", model: "trust", rationale: "trusted: an identical operation was already approved in this session" });
       return "allowed-once";
     }
 
@@ -923,7 +975,7 @@ export class AgentApprovalService extends TypertRemoteService {
         persona: APPROVER_PERSONA,
       });
     } catch (error) {
-      this._record({ ...base, outcome: "unavailable", riskLevel: "-", model: route.label, rationale: "approval agent failed to start: " + errText(error) });
+      this._record(session, { ...base, outcome: "unavailable", riskLevel: "-", model: route.label, rationale: "approval agent failed to start: " + errText(error) });
       return "unavailable";
     }
     base.childSessionId = shortId(run.id);
@@ -960,7 +1012,7 @@ export class AgentApprovalService extends TypertRemoteService {
         (verdict.decision === "approve" || verdict.decision === "reject")
       ) {
         const approved = verdict.decision === "approve";
-        this._record({
+        this._record(session, {
           ...base,
           outcome: approved ? "allowed-once" : "rejected",
           riskLevel: String(verdict.riskLevel || "-"),
@@ -979,7 +1031,7 @@ export class AgentApprovalService extends TypertRemoteService {
         }
         return approved ? "allowed-once" : "rejected";
       }
-      this._record({
+      this._record(session, {
         ...base,
         outcome: "unavailable",
         riskLevel: "-",
@@ -990,11 +1042,11 @@ export class AgentApprovalService extends TypertRemoteService {
       return "unavailable";
     }
     if (winner.kind === "aborted") {
-      this._record({ ...base, outcome: "cancelled", riskLevel: "-", model: route.label, rationale: "request cancelled while the approval agent was judging" });
+      this._record(session, { ...base, outcome: "cancelled", riskLevel: "-", model: route.label, rationale: "request cancelled while the approval agent was judging" });
       return "cancelled";
     }
     if (winner.kind === "timeout") {
-      this._record({
+      this._record(session, {
         ...base,
         outcome: "unavailable",
         riskLevel: "-",
@@ -1003,7 +1055,7 @@ export class AgentApprovalService extends TypertRemoteService {
       });
       return "unavailable";
     }
-    this._record({ ...base, outcome: "unavailable", riskLevel: "-", model: route.label, rationale: "approval agent infrastructure fault: " + errText(winner.error) });
+    this._record(session, { ...base, outcome: "unavailable", riskLevel: "-", model: route.label, rationale: "approval agent infrastructure fault: " + errText(winner.error) });
     return "unavailable";
   }
 
@@ -1051,7 +1103,6 @@ export class AgentApprovalService extends TypertRemoteService {
         timeoutMs: this._timeoutMs,
         enabledSessions: this._sessionInfos(),
         rules: this._rulesSnapshot(),
-        records: this._records.slice(-50).reverse(),
       },
     };
   }
@@ -1136,11 +1187,34 @@ export class AgentApprovalService extends TypertRemoteService {
     return { ok: true, value: { rules: this._rulesSnapshot() } };
   }
 
-  /** Clear the audit records (memory + persisted file). */
-  async clearRecords() {
-    this._records = [];
-    await this._rewriteRecordsFile();
-    return { ok: true, value: { cleared: true } };
+  /**
+   * Fold ONE session's audit records out of its sidecar storage (see
+   * `_recordsFileOf` / `_recordsOf`). Powers the conversation window's「审批」
+   * tab — the records are requested per session and rendered next to the
+   * 轨迹 tab, exactly where they were produced. The session must be live (it
+   * always is when its conversation window is open). Also reports whether
+   * the mode is currently enabled for the session so the tab can show the
+   * state.
+   */
+  async sessionRecords(request) {
+    const sessionId = request && typeof request.sessionId === "string" ? request.sessionId : "";
+    if (sessionId === "") {
+      return { ok: false, error: { code: "invalid-session", message: "sessionId is required" } };
+    }
+    const agent = this.ctx.agents.get(sessionId);
+    if (agent === undefined) {
+      return {
+        ok: false,
+        error: { code: "session-not-live", message: "that session is not live right now" },
+      };
+    }
+    return {
+      ok: true,
+      value: {
+        records: await this._recordsOf(agent.session),
+        enabled: this._enabled.has(sessionId),
+      },
+    };
   }
 
   /**

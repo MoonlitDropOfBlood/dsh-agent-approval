@@ -10,7 +10,7 @@
 - 审批 Agent 在**独立会话**里运行：零父级上下文、全局工具全部空白（`toolFilter: {allow:[]}`）、审批策略被委派机制钉死为 `never`（不可能递归再审批），必须通过 `structured_output` 结构化工具给出裁决：`{ decision: approve|reject, riskLevel, rationale }`。
 - **风险即拒绝**：破坏性 / 不可逆 / 越界 / 理由与实际参数不符 → `reject`；只有"安全、可逆、与任务相符、理由诚实"才 `approve`。
 - **Fail-closed**：审批 Agent 启动失败、超时、结果不合法、请求被取消 → 一律按拒绝处理（`unavailable`/`cancelled`），绝不静默放行。
-- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或 Harness 默认模型）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化，审计行可一键「加白」）、**最近审批记录（审计，本地持久化）**（结论/风险/模型/耗时/理由，悬停看完整理由与工具参数）。
+- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或 Harness 默认模型）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化）。**审计不在这里**：会话窗口顶部新增**「审批」标签页**（`conversation.view` ring，紧邻「轨迹」；chat=0 / trajectory=10 / 审批=11），按会话折叠展示审批记录（**倒序、最新在上**；结论/风险/模型/耗时/理由，悬停看完整理由与工具参数，行内可一键「加白」）——记录存在**会话目录内的独立旁路文件**（见第 6 节）。
 - 输入框 `/permission` 菜单的「Agent 审批」预设 + `/agent-approval on|off` 命令为当前会话开关（**刻意没有 composer chip**——开关本就属于权限菜单，菜单旁边再放一个属冗余，已移除）；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
 
 ## 目录结构
@@ -105,15 +105,22 @@ const run = await this.ctx.subagents.start("spawn", {
 提权进入 `_judge` 后按固定顺序短路，全部**零模型开销、零人工弹窗**：
 
 1. **deny 规则命中 → 直接 `rejected`**（所有 deny 先于任何 allow 判定，后加的 deny 永远压过先加的 allow）；**allow 规则命中 → 直接 `allowed-once`**。规则形状 `{ id, effect, tool, match, note, createdAt }`，持久化在 config.json 的 `rules` 字段：`tool` 为精确工具名或 `"*"`；`match` 为空 = 该工具全部调用，否则是**参数原始 JSON 的子串**或 `/pattern/flags` 正则（`_ruleRegex` 编译失败 = 永不命中，`addRule` 时即校验拒绝）。规则命中也写审计（model 列记 `rule`）。
-2. **会话内信任缓存**：模型 approve 后把 `工具名 + "\n" + 参数原始 JSON` 指纹存入该会话的 Set（`_trusted` Map）；同一会话内**参数逐字节相同**的再次提权直接 `allowed-once`（审计 model 列记 `trust`）。**不跨会话、不泛化到相似参数**，随 `_enabled` 条目一起在三处删除点清空（preset 切走 / session disposed / `_disable`）。跨会话复用走规则表：设置页审计行的「加白」按钮一键把已批准操作存成 allow 规则（记录里的 args 是完整参数 JSON 的**前缀**，截断标记 `…[truncated]` 需先剥掉）。
+2. **会话内信任缓存**：模型 approve 后把 `工具名 + "\n" + 参数原始 JSON` 指纹存入该会话的 Set（`_trusted` Map）；同一会话内**参数逐字节相同**的再次提权直接 `allowed-once`（审计 model 列记 `trust`）。**不跨会话、不泛化到相似参数**，随 `_enabled` 条目一起在三处删除点清空（preset 切走 / session disposed / `_disable`）。跨会话复用走规则表：会话窗口「审批」tab 审计行的「加白」按钮一键把已批准操作存成 allow 规则（记录里的 args 是完整参数 JSON 的**前缀**，截断标记 `…[truncated]` 需先剥掉）。
 3. 都不命中才 spawn 审批模型。
 
 - 设置页「放行 / 拒绝规则」卡片管理规则（Remote 方法 `addRule`/`removeRule`，整表返回；`getState` 带 `rules` 字段，client 对旧 Host 缺该字段时降级为 `[]`）。
 - wire 变更照旧三处同步：index.js 构造、typert.host.js（`ruleSchema` + `rulesValueSchema` + 两个 invocation + `AgentApprovalRule`/`AgentApprovalRulesResult` 类型声明）、client.js（描述符 + UI）。
 
-### 6. 审计记录
+### 6. 审计记录（v1.5.1 起：会话目录内的独立旁路文件）
 
-- 内存环形数组，上限 200 条，`getState()` 返回倒序最近 50 条；**每条同时追加落盘** `<DSH_HOME>/agent-approval/records.jsonl`（JSONL，一行一条），启动时读回最近 200 条并把文件压实回上限（防无限增长），`clearRecords` 同步清空文件。每条：时间、会话（短 id）、工具、结论、风险等级、审批模型、耗时、理由（截断 600）、`childSessionId`（审批 Agent 自己的会话短 id——在会话列表里能找到完整推理记录）。
+- 每条裁决由 Host `_record(session, entry)` 追加到**请求会话自己存储目录里的旁路文件** `<sessionDir>/agent-approval.jsonl`，目录经 `sessionPersistence.locate(session.header)` 解析（纯路径计算，活会话可用；返回 `{kind:"jsonl", path:<session.jsonl.zstd 绝对路径>}`，取 dirname）。定位失败降级为 `<DSH_HOME>/agent-approval/records/<sessionId>.jsonl`（重启仍安全，但删会话不随删）。语义上仍是"跟随会话保存"：随会话目录存在，删除会话即消失。
+- **绝不要把审计写进会话事件日志（v1.5.0 的方案，半天即废弃）**。踩坑全过程：`dsh-session` 的 `append()` 运行时不校验事件类型枚举，`dsh-session-persistence-jsonl` 也按原样回放——但 **`dsh-session-persistence` seam 在加载时强制校验**：`KNOWN_SESSION_EVENT_TYPES` 之外的类型，事件信封必须带 `ignorable: true`，否则**整个日志拒绝加载**（"refusing to interpret"）。而活会话的写入口 `session.append(type, data)` 只接受 type/data/surface 元数据，**给不了 ignorable 标记**（类型签名也限死 `SessionEventType`）——所以一条审批记录就会让该会话永远无法恢复。另外日志压实（compaction）也可能丢弃 ignorable 外部事件。
+- **"v1.5.0 零写入"的旧结论是假的，2026-09-06 已证伪并修复**。旧版 `check-session-log.mjs` 用朴素 magic 扫描切帧且带占位符 bug，只解出部分帧就报"零写入"——实际 session-886106a4 的日志里有 **3 条**未标 ignorable 的 `agent-approval/record`（seq 52022/117810/140809），会话历史加载被拒。注意官方机制本就给插件事件留了正门：`dsh-session` 的 `known-event-types.js` 明说 **`ignorable` 标记就是 repo 外插件事件的兼容机制**（只是 `session.append` 的活写入路径给不了它）。修复用 `scripts/repair-session-log.mjs`：按 `scanZstdFrames` 的结构化走帧（逐 block header 前进，不靠帧头 content size），**只给 3 个事件的信封补 `"ignorable":true` 并重压所在帧，其余帧字节不动**——绝不能删行，扫描器强制 seq 连续（`event.seq !== events.length` 即 seq gap）。写前快照 mtime/size 防并发写、写前备份、写后全帧解码验证。校验/扫描用重写后的 `check-session-log.mjs`（可 `import { auditLog }` 库用；注意 `text-chunks`/`reasoning-chunks`/`tool-call-chunks` 是存储行、`type:"session"` 是头记录，都不进事件类型校验；`zstdDecompressSync`/`createZstdDecompress` 对多帧拼接文件只会解出第一帧，必须逐帧解）。全库 194 个日志复扫，仅此一个会话中毒。seq 140809 写于 12:27:59（"重启"之后）——说明当时仍有旧构建的 Host 半在写日志；现装 v1.5.1 已验证只剩 `permission/preset`/`sandbox/mode` 两种已知类型的 `session.append`。
+- **最终裁定（2026-09-06，用户明确）**：zstd 会话日志里**不存、不读任何插件自定义数据**。v1.5.2 起 `sessionRecords` **只读旁路文件**（v1.5.1 的"防御性日志折叠"已删除，`RECORD_EVENT` 常量一并移除）。日志中遗留的 3 条 ignorable record 事件（seq 52022/117810/140809）为惰性历史，加载已验证安全；**物理删除不可行**——删行会破坏 seq 连续性（扫描器以 `event.seq !== events.length` 判 gap），修复需全日志重编号，风险远大于收益，不要尝试。
+- 读取：Host `sessionRecords({ sessionId })` **只读旁路文件**（`_recordsFileOf`），按 `at` 正序返回，同时带 `enabled`（该会话当前是否开启）。Client「审批」tab 挂载 + 每 10s 轮询（tab 未激活时不渲染、不轮询）。
+- 每条：时间、会话、工具、结论、风险等级、审批模型、耗时、理由（截断 600）、`childSessionId`（审批 Agent 自己的会话短 id——在会话列表里能找到完整推理记录）。
+- **追加必须吞错**：`_record` 是 fire-and-forget 且全链 try/catch——审计失败绝不影响审批主流程。没有"清空记录"：随会话存储的事实源，且权威审计（`approval/asked`+`approval/decided` 事件对）本就不归我们管。
+- **v1.4 → v1.5 迁移**：`scripts/migrate-records.mjs`（`--dry-run` 可预览）把旧全局 `records.jsonl` 按短 sessionId（UUID 前 8 字符）匹配到 `~/.dsh/sessions/<workspace>/<session-id>/`，追加写入各会话的 `agent-approval.jsonl`（幂等去重），最后把旧文件改名为 `records.jsonl.migrated` 防止重复迁移。历史 bug 行（`sessionId` 为字面 `"session-"`）无法归属，直接跳过。本机已迁移：157 条 → 8 个会话，56 条无法归属。
 - **必须整形状构造**（`typert.host.js` 的 result schema 是 strict）：每个字段都在、类型正确，数组用 `.readonly()`。新增字段要同步改三处（index.js 构造、typert schema、client 展示）。
 - **短 id 切片必须跳过 `session-` 前缀**：DSH 的 sessionId 是 `session-${randomUUID()}` 格式（见 `dsh-host-apiproxy/lib/index.js` 的 `session create`：`session-${randomUUID()}`），前缀正好 8 字符，`String(id).slice(0, 8)` 只会切到那个无意义的前缀——历史 bug：所有审计行的 `sessionId` 全是 `"session-"`，已开启会话 chip 显示也是。Host 的 `shortId()` / Client 的 `shortSessionId()` 都必须先 `id.startsWith("session-")` 剥掉前缀再取 8 字符；`childSessionId` 来自 `run.id = randomUUID()`（无前缀），同一函数兼容。**不要**改回 naive slice——会再次触发。
 
@@ -124,7 +131,7 @@ const run = await this.ctx.subagents.start("spawn", {
 - **Remote 命名空间必须自挂载**：`await ctx.remote.$mount(CLIENT_REMOTE)`（dsh-api-remotes 只挂载官方命名空间），然后 `ctx.get("remote.agentApproval")`。描述符与 `typert.host.js` 的 invocation 一一对应；浏览器没有 zod，用 passthrough schema（`{ parse: (v) => v }`）。
 - **返回值双层信封**：gateway 返回 `res.value` = Host 方法的 `{ ok, value }` 信封，client 的 `pick()` 做容忍双形状解包 + 双层错误上抛（token-stats 踩过"多包一层"的坑）。
 - **CSS 注入**用 `document.createElement("style")` + `ctx.effect(() => () => styleTag.remove())`；样式一律用 `--dsw-alias-*` 主题变量。
-- 一个 Slot：`settings.section`（id `agent-approval`，order 30，label `() => SETTINGS_LABEL`）。曾有过 `conversation.input.left` 的「🛡 审批」chip（id `agent-approval-toggle`，order 15，InputZone owner props 传 `props.session`，只读 `sessionId` 叶子字段），已移除——开关本就属于 /permission 菜单，菜单旁边再放一个开关是冗余。
+- 两个 Slot：`settings.section`（id `agent-approval`，order 30，label `() => SETTINGS_LABEL`）+ `conversation.view`（id `agent-approval-audit`，**order 11**——chat=0、trajectory=10，紧邻轨迹；label `() => "审批"`）。conversation.view 是 **session-scoped list slot**：组件经标准 kit 拿到 `useSession` hook，`useSession((s) => s)` 的快照读 `sessionId` 叶子字段即可，无需 inject；组件只在 tab 激活时渲染（`renderSlot(..., { only: active.id })`），轮询因此零闲置开销。tab 栏渲染条件是 `tabs.length > 1`，注册即出现。曾有过 `conversation.input.left` 的「🛡 审批」chip（id `agent-approval-toggle`，order 15，InputZone owner props 传 `props.session`，只读 `sessionId` 叶子字段），已移除——开关本就属于 /permission 菜单，菜单旁边再放一个开关是冗余。
 - **设置导航图标**：DSH 0.1.x 的 `settings.section` 只投影 `id/order/label`，设置壳对每个外部 section 统一画通用齿轮（`client-ui-settings-general` 的 `navIcon()`，没有公开图标字段）。client.js 里 `registerSettingsNavIcon(SETTINGS_LABEL)` 用 MutationObserver 给 `[role="dialog"] nav button` 中文本等于 section label 的行打 `data-dsh-agent-approval-settings-nav` 标记，CSS 再隐藏 `>svg:first-child` 齿轮、用 `currentColor` mask 画 shield-check Lucide 图标（16px，跟随原生 hover/active 颜色）。换图标只需替换 CSS 里 data URI 的 SVG path（Lucide，24×24，stroke-width 2，stroke 用 black——mask 只取 alpha）。
 - client.js 里**不要用 `?.` / `??`**（与 token-stats 保持一致的保守写法），用 `&&`/`||`；不要 `import`，用 `require("react")`。
 
@@ -186,11 +193,11 @@ npm run patch:glyph      # 可选：权限菜单图标（幂等）
 改插件后**必须重启 DSH 进程**才生效。验证：
 1. 输入框 `/permission` 菜单出现第四项 **Agent 审批**；设置 → 侧栏导航出现 **Agent 审批** 页（模型/超时可保存）。
 2. 用 `/agent-approval on` 或菜单选 **Agent 审批** 为会话开启（两条路径等价）；输入框左侧**不再有**「🛡 审批」chip。
-3. 开启后让工作区内命令触发一次提权重试（`sandbox_permissions`）：**不弹人工审批**，片刻后工具结果即为批准/拒绝；设置页出现一条审计记录（含风险等级与理由）。
+3. 开启后让工作区内命令触发一次提权重试（`sandbox_permissions`）：**不弹人工审批**，片刻后工具结果即为批准/拒绝；会话窗口顶部出现**「审批」标签页**（轨迹旁），点开能看到这条记录（含风险等级与理由；10s 内自动刷新，也可手动点「刷新」）。
 4. `/agent-approval off` 关闭：沙箱模式与审批策略恢复开启前的值，菜单同步切回对应预设；再次提权回到人工弹窗（ask）或原策略行为。
 5. 菜单切到 danger-full-access：模式自动关闭（`permission/preset` 事件联动，立即生效）；菜单切回 Agent 审批：模式自动开启，无需手动执行命令。
 6. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
-7. 设置页加一条 allow 规则（如工具 `pwsh` + match 子串）→ 命中的提权**不再起审批子代理**，审计 model 列显示 `rule`；模型批准的提权在同一会话内以完全相同参数再次发起 → 直接放行，model 列显示 `trust`；审计行点「加白」→ 规则表新增对应 allow 规则。
+7. 设置页加一条 allow 规则（如工具 `pwsh` + match 子串）→ 命中的提权**不再起审批子代理**，审计 model 列显示 `rule`；模型批准的提权在同一会话内以完全相同参数再次发起 → 直接放行，model 列显示 `trust`；「审批」tab 审计行点「加白」→ 规则表新增对应 allow 规则。
 
 ## 发布
 
@@ -203,4 +210,4 @@ npm run patch:glyph      # 可选：权限菜单图标（幂等）
 - 声称（claim）的范围是"该会话的**所有** approval 请求"——不止 pwsh/bash 提权，也包括任何 `tools/pre-execute` 产生的人工 ask。这是有意语义（"帮我审批"），提示词写成通用审批口径。
 - `approval.setPolicy` 会在模型上下文里注入 "changed by the user" 通知——用户确实主动开了开关，语义可接受；不要绕开它手写 `approval/policy` 事件（会丢失通知）。
 - 审批模型未配置时使用 **Harness 默认路由**（`agentDefaultModel.currentSelection()`；该可选服务缺席或解析为空时才退化为继承请求会话路由）；配置后走 `agentOptions` 精确覆盖。**刻意不跟随请求会话的模型**——审批口径必须稳定可预期，不随各会话的模型切换而漂移。
-- 审计记录**持久化**在 `<DSH_HOME>/agent-approval/records.jsonl`（重启保留最近 200 条）；审批模型与超时持久化在同目录 `config.json`（重启恢复，不再回落默认）。持久化失败是 best-effort 静默降级（内存态仍可用），绝不影响审批主流程。DSH 的权威审计仍在会话日志的 `approval/asked` + `approval/decided` 事件对（本插件不破坏该配对，只在瀑布层给结论）。
+- 审计记录（v1.5.1 起）存在**会话存储目录内的旁路文件** `<sessionDir>/agent-approval.jsonl`（经 `sessionPersistence.locate` 定位；v1.4→v1.5 迁移用 `scripts/migrate-records.mjs`，见第 6 节）；插件只持久化**设置**——审批模型与超时在 `<DSH_HOME>/agent-approval/config.json`（重启恢复，不再回落默认）。持久化失败是 best-effort 静默降级，绝不影响审批主流程。DSH 的权威审计仍在会话日志的 `approval/asked` + `approval/decided` 事件对（本插件不破坏该配对，只在瀑布层给结论）。
