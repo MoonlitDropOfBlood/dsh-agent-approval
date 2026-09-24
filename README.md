@@ -62,7 +62,7 @@
 dsh plugin --profile web add /path/to/dsh-agent-approval
 
 # 正式发布：从 GitHub Release tarball 安装（资产名为 npm pack 的 scope 形式）
-dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.7.1/duke-dsh-plugins-dsh-agent-approval-1.7.1.tgz
+dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.7.2/duke-dsh-plugins-dsh-agent-approval-1.7.2.tgz
 ```
 
 重启 DSH 后：设置面板出现 **Agent 审批** 页；`/permission` 菜单出现第四项 **Agent 审批**。

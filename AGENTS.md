@@ -110,7 +110,7 @@ const run = await this.ctx.subagents.start("spawn", {
 - **questions**（`JEV_QUESTIONS` 常量）：`decision` = Choice(approve/reject，**策略全部写进 criteria 描述**——Jev 按字面读指令、领域知识只能进 state+criteria)；`riskLevel` = Choice(low/medium/high)；`concreteRisk` = Noul（"是否存在具体可信风险"辅助信号，只进审计理由）。措辞口径与子代理提示词一致（含开发流程口径与误杀治理）。
 - **置信度门控**：`decision.confidence < 阈值`（默认 0.5，可配 0.01–0.99）→ `unavailable`——**对称适用**：低置信的 reject 也不记拒绝（v1.4.0 误杀治理的对称版："模型没把握就不裁决"）。
 - **结果映射**：approve → `allowed-once`（写信任缓存）；reject → `rejected`；任何畸形返回 / 非 200 / 传输故障 / 超时 → `unavailable`；取消 → `cancelled`（AbortController 联动 `req.signal`，同一 `this._timeoutMs` 竞速，`finally` 里无条件 abort 掉传输）。
-- **审计**：model 列 `jev(<served version>)`——响应体 `model` 字段会解析别名（请求 jev-latest → 记 jev-1.13.0）；理由列由概率分布合成（**Jev 不生成文字**，没有自然语言推理可记）；`childSessionId` 为空（没有子会话）。
+- **审计**：model 列 `jev(<served version>)`——响应体 `model` 字段会解析别名（请求 jev-latest → 记 jev-1.13.0）；理由列由概率分布合成（**Jev 不生成文字**，没有自然语言推理可记；v1.7.2 起同时含**风险轴**的置信度与 `p low/medium/high`——`riskLevel` 与 `decision` 是两条独立问题，**risk=high 不改变 outcome**，但审计理由必须能看出 high 的把握度，字段缺失只省略、绝不改变校验门槛）；`childSessionId` 为空（没有子会话）。
 - **wire 同步**：`setJevConfig` invocation（index.js `markRemoteMethod` + typert.host.js `jevConfigSchema`/invocation/`AgentApprovalJevConfig` 等类型 + client.js 描述符）；`getState` 带 `jev` 字段，client 对旧 Host 缺该字段时保留空草稿降级（saveJev 还有 `typeof remote.setJevConfig === "function"` 守卫）。
 - **已知限制**（设置卡片已注明）：Jev 官方声明中日韩文本"可处理但准确率较低"（审批 state 里的中文任务上下文会打折）；early access 阶段速率限制可能变化——所有异常都归 fail-closed，不会误放行。
 

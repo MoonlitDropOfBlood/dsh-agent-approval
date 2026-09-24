@@ -1394,6 +1394,20 @@ export class AgentApprovalService extends TypertRemoteService {
 
     const pApprove = Number(probabilities.approve);
     const pReject = Number(probabilities.reject);
+    // riskLevel 是与 decision 独立的另一条 Choice（v1.7.2）：审计里 risk=high
+    // 却看不到 high 的把握度，记录无法自解释。与 decision 同款防御读取，字段
+    // 缺失只做省略——纯审计文本增强，不改变任何 outcome 判定与校验门槛。
+    const riskProbabilities =
+      risk && risk.probabilities && typeof risk.probabilities === "object" ? risk.probabilities : {};
+    const pLow = Number(riskProbabilities.low);
+    const pMedium = Number(riskProbabilities.medium);
+    const pHigh = Number(riskProbabilities.high);
+    const riskConfidence = risk ? Number(risk.confidence) : NaN;
+    const riskParts = [];
+    if (Number.isFinite(riskConfidence)) riskParts.push("置信度 " + riskConfidence.toFixed(2));
+    if (Number.isFinite(pLow) && Number.isFinite(pMedium) && Number.isFinite(pHigh)) {
+      riskParts.push("p low/medium/high " + pLow.toFixed(2) + "/" + pMedium.toFixed(2) + "/" + pHigh.toFixed(2));
+    }
     const rationale =
       "Jev 决策=" + choice +
       "（置信度 " + confidence.toFixed(2) +
@@ -1401,6 +1415,7 @@ export class AgentApprovalService extends TypertRemoteService {
         ? "，p approve/reject " + pApprove.toFixed(2) + "/" + pReject.toFixed(2)
         : "") +
       "）；风险=" + riskChoice +
+      (riskParts.length > 0 ? "（" + riskParts.join("，") + "）" : "") +
       "；具体风险概率=" + probeNoul.toFixed(2) +
       "。Jev 为结构化决策模型，不生成文字，本理由由概率分布合成。";
 
