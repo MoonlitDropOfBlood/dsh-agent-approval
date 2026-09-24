@@ -61,8 +61,8 @@
 # 本地开发：pnpm 软链到本仓库，改代码即生效（无需重新复制）
 dsh plugin --profile web add /path/to/dsh-agent-approval
 
-# 正式发布：从 GitHub Release tarball 安装
-dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.7.0/dsh-agent-approval-1.7.0.tgz
+# 正式发布：从 GitHub Release tarball 安装（资产名为 npm pack 的 scope 形式）
+dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.7.1/duke-dsh-plugins-dsh-agent-approval-1.7.1.tgz
 ```
 
 重启 DSH 后：设置面板出现 **Agent 审批** 页；`/permission` 菜单出现第四项 **Agent 审批**。

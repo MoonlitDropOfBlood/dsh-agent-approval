@@ -1,6 +1,6 @@
 {
   "name": "@duke-dsh-plugins/dsh-agent-approval",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Agent-decided approvals for DeepSeek Harness: a workspace-write base permission mode where an independent approval judge (an isolated subagent, or the TypeSafe Jev decision model via direct API) evaluates every sandbox escalation (risky operations are rejected), with a configurable approval model and a per-session audit trail in the conversation window's 审批 tab.",
   "repository": {
     "type": "git",
@@ -32,11 +32,20 @@
     },
     "client": {
       "platform": "web"
+    },
+    "engines": {
+      "dsh": "^0.1.5-rc.3"
     }
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh": "^0.1.5-rc.3",
     "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.7 || ^0.1.7-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
   },
   "dependencies": {
     "zod": "^4.4.3"

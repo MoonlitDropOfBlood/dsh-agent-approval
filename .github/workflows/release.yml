@@ -99,9 +99,10 @@ jobs:
 
             ### 📦 安装（标准 DSH bundle）
             ```bash
-            dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.3.4/dsh-agent-approval-1.3.2.tgz
+            dsh plugin --profile web add @duke-dsh-plugins/dsh-agent-approval
             # 重启 DSH 后，设置面板出现「Agent 审批」页
             ```
+            > 需要钉版本时用下方 Assets 里的 tarball（`duke-dsh-plugins-dsh-agent-approval-<版本>.tgz`）。
             > 可选：菜单图标补丁 `npm run patch:glyph`（详见 README；不跑只是菜单项没图标，功能不受影响）。
           files: artifacts/*
         env:
