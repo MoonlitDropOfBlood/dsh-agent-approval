@@ -44,6 +44,7 @@ dsh-agent-approval/
 - `typert.host.js` 的 `model.services[].key` / `exportName` → `agentApproval` / `AgentApprovalService`；每个 invocation 的 id/service/namespace/method 与 client 描述符一一对应
 - `client.js` 的 `CLIENT_REMOTE` 描述符 id → `dsh-agent-approval#agentApproval/<method>`，调用走 `ctx.get("remote.agentApproval").<method>()`
 - `package.json` 的 `exports`：`"."`、`"./client"`、`"./typert"`、`"./package.json"`（**必须**有 `./package.json`，否则 `require.resolve("<pkg>/package.json")` 失败）
+- **codec 双格式（v1.7.0，两代 Typert 契约并存）**：manifest 与 client 描述符的每个 codec/result **必须同时**带 `schema` 与 `create: () => schema` 两个字段（指向同一 schema 对象）——DSH ≤0.1.5-rc.3 的 typert-loader 校验 `"_zod" in schema`、client registry 校验 `schema.parse`，而 DSH 0.1.7-rc.1 起两侧都改校验 `create()` 工厂（"has no create() factory" 直接拒绝注册：Host 侧 Remote 全挂、Client 侧 `$mount` 抛错让整个 bundle 的 apply 失败）。改 wire 形状后必须跑 `npm run check`（内含 `scripts/check-typert-manifest.mjs`：镜像两代校验器 + 从真实 client.js 提取描述符做 id/参数/typeSymbol 对齐）。
 
 ### 2. Host 半：类插件 + Remote 方法
 
@@ -141,7 +142,7 @@ const run = await this.ctx.subagents.start("spawn", {
 
 - 必须 `window.__ModuleLoader__.load({ id, factory })`，`exports.inject = ["slots", "remote"]`。
 - **按钮一律用官方 Button 原子**：`const ui = require("@deepseek-ai/dsh-client-ui-primitives")`，`h(ui.Button, { variant: "primary"|"ghost"|"outline", size: "sm", onClick }, "…")`。自定义 `.aapr-btn` 按钮样式已移除——它不跟 `--dsw-alias-button-*` token 家族，深色模式下难看（与 dsh-memory-manager 踩过的同一个坑，同一个修法）。
-- **Remote 命名空间必须自挂载**：`await ctx.remote.$mount(CLIENT_REMOTE)`（dsh-api-remotes 只挂载官方命名空间），然后 `ctx.get("remote.agentApproval")`。描述符与 `typert.host.js` 的 invocation 一一对应；浏览器没有 zod，用 passthrough schema（`{ parse: (v) => v }`）。
+- **Remote 命名空间必须自挂载**：`await ctx.remote.$mount(CLIENT_REMOTE)`（dsh-api-remotes 只挂载官方命名空间），然后 `ctx.get("remote.agentApproval")`。描述符与 `typert.host.js` 的 invocation 一一对应；浏览器没有 zod，用 passthrough schema（`{ parse: (v) => v }`），且每个 codec 同时携带 `schema` + `create: () => schema` 双格式（见第 1 节 codec 双格式；0.1.7 起 `$mount` 校验 `create()`）。
 - **返回值双层信封**：gateway 返回 `res.value` = Host 方法的 `{ ok, value }` 信封，client 的 `pick()` 做容忍双形状解包 + 双层错误上抛（token-stats 踩过"多包一层"的坑）。
 - **CSS 注入**用 `document.createElement("style")` + `ctx.effect(() => () => styleTag.remove())`；样式一律用 `--dsw-alias-*` 主题变量。
 - 两个 Slot：`settings.section`（id `agent-approval`，order 30，label `() => SETTINGS_LABEL`）+ `conversation.view`（id `agent-approval-audit`，**order 11**——chat=0、trajectory=10，紧邻轨迹；label `() => "审批"`）。conversation.view 是 **session-scoped list slot**：组件经标准 kit 拿到 `useSession` hook，`useSession((s) => s)` 的快照读 `sessionId` 叶子字段即可，无需 inject；组件只在 tab 激活时渲染（`renderSlot(..., { only: active.id })`），轮询因此零闲置开销。tab 栏渲染条件是 `tabs.length > 1`，注册即出现。曾有过 `conversation.input.left` 的「🛡 审批」chip（id `agent-approval-toggle`，order 15，InputZone owner props 传 `props.session`，只读 `sessionId` 叶子字段），已移除——开关本就属于 /permission 菜单，菜单旁边再放一个开关是冗余。
@@ -153,7 +154,7 @@ const run = await this.ctx.subagents.start("spawn", {
 权限菜单（输入框 `/permission` 控件）的选项来自 **`dsh-permission-presets` 的 Config 预设表**；Web 端切换 = 执行 `/permission <preset>` 命令 → 追加 `permission/preset` 事件 + 旋钮事件。要让「Agent 审批」出现在菜单里：
 
 1. **包的 `cordis.patch.yml`（bundle patch）里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / **agent-approval** / danger-full-access）——**声明顺序即菜单顺序**，agent-approval 排在 Full access 上面；DSH 升级若改了基础表要手动同步。
-2. **菜单图标（v1.3.2+ 由插件内置，无需 patch）**：菜单行 + 触发按钮的图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`（源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**，外部预设整行不渲染图标元素。client.js 的 `registerPermissionGlyphIcon(SETTINGS_LABEL)` 用 MutationObserver 给「Agent 审批」的 `/permission` 菜单行（`[role="menu"] button[role="menuitem"]` 中文本等于 label 者）和输入框旁触发按钮（非 menuitem、不在 `[role="dialog"]` 内、首 span 文本等于 label 且含 svg 者）分别打 `data-dsh-agent-approval-perm-item` / `data-dsh-agent-approval-perm-trigger` 标记，CSS 再用 `currentColor` mask 画盾牌 + AI 星形（16×16，与出厂图标同风格）。**菜单行有 glyph-set 守卫**：只在"兄弟行已带官方图标"的菜单里打标——判定为菜单内存在 `span[class*="_itemIcon_"]`（CSS-modules 编译保留源类名子串；选中行的对勾是 `_check_`，不会误判）。设置页 → 通用 → 「权限」行的默认预设下拉（`Menu portal:true` 传送到 `<body>`，所有预设都无图标）因此**不再**被误标——否则「Agent 审批」会成为那里唯一带图标的行。历史方案 `scripts/patch-glyph.mjs`（直接补丁官方编译产物）已被取代——插件内置版随包分发、DSH 升级不丢；脚本保留作参考，新安装**不再需要**跑它。
+2. **菜单图标（v1.3.2+ 由插件内置，无需 patch）**：菜单行 + 触发按钮的图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`（源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**，外部预设整行不渲染图标元素。client.js 的 `registerPermissionGlyphIcon(SETTINGS_LABEL)` 用 MutationObserver 给「Agent 审批」的 `/permission` 菜单行（`[role="menu"] button[role="menuitem"]` 中文本等于 label 者）和输入框旁触发按钮（非 menuitem、不在 `[role="dialog"]` 内、首 span 文本等于 label 且含 svg 者）分别打 `data-dsh-agent-approval-perm-item` / `data-dsh-agent-approval-perm-trigger` 标记，CSS 再用 `currentColor` mask 画盾牌 + AI 星形（16×16，与出厂图标同风格）。**菜单行有 glyph-set 守卫**：只在"兄弟行已带官方图标"的菜单里打标——判定为菜单内存在 `span[class*="itemIcon"]`（v1.7.0 从 `_itemIcon_` 放宽：CSS-modules 两代编译名不同（`_itemIcon_<hash>_` vs `<hash>_itemIcon`）；选中行的对勾是 `_check_`，不会误判）。0.1.7-rc.1 起权限控件从 dsh-client-ui-conversation 拆到独立包 `dsh-client-ui-permission-presets`（composer 里挂 `conversation.input.permission` slot，`PermissionSelect` 已从 conversation 包删除），但菜单仍是同一 Menu 原语（`button[role=menuitem]` + itemIcon span），标记逻辑不变。设置页 → 通用 → 「权限」行的默认预设下拉（`Menu portal:true` 传送到 `<body>`，所有预设都无图标）因此**不再**被误标——否则「Agent 审批」会成为那里唯一带图标的行。历史方案 `scripts/patch-glyph.mjs`（直接补丁官方编译产物）已被取代——插件内置版随包分发、DSH 升级不丢；脚本保留作参考，新安装**不再需要**跑它。
 3. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；命令关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
 4. **事件联动**（`session/event` 监听 `permission/preset`）：
    - 选中 `agent-approval` → `_enableCore`（此刻旋钮事件还没落，捕获的 prev 恰是切换前的值；我们写的旋钮值与预设服务随后要写的相同，它检查后跳过，无重复事件）。
@@ -195,10 +196,29 @@ const run = await this.ctx.subagents.start("spawn", {
 5. 卸载：`dsh plugin --profile web remove dsh-agent-approval`（自动从 bundles 列表移除）。
 6. **可选（权限菜单图标）**：菜单图标在官方 bundle 的硬编码映射里，标准安装不会补——本地开发想要图标就 `npm run patch:glyph`（见第 8 节）。
 
+### 10. DSH 0.1.7-rc.1 兼容（v1.7.0）
+
+对照 npm tarball 逐文件 diff（0.1.5-rc.3 → 0.1.7-rc.1）核对过本插件触及的全部宿主 API 面，结论：
+
+- **唯一硬破坏：Typert codec 契约**。0.1.7 的 `dsh-typert-loader` / `dsh-typert-registry`（Host+Client）都把「zod v4 `codec.schema`」换成了「`codec.create()` 工厂」（gateway 运行时 `codec.create().parse(value)`，`schemas[]` 条目同理）。v1.6.0 及更早在 0.1.7 上注册即被拒：Host 侧 manifest 注册失败、Remote 全挂；Client 侧 `$mount` 抛错、整个 client bundle 的 apply 失败。修法即第 1 节「codec 双格式」。
+- **逐项核对过、无需改动的面**：
+  - `approval/request` 瀑布、`ApprovalRequestEvent`（agent/toolName/callId/reason/signal）、`ApprovalOutcome` 四值、`approval.setPolicy`/`overrideOf`/`config.policy` 全部原样。
+  - `subagents.start("spawn")` 请求形（label/prompt/parent/signal/agentOptions/outputSchema/toolFilter/persona）与 `SubagentRun`（id/result/dispose）原样；`assertObjectJsonSchema` 受限子集未变（`dsh-invariants` 无改动）。
+  - `session.snapshotEvents()` 在 0.1.7 被标记**弃用**（"现有逻辑可以暂不迁移，但禁止新增生产调用"，`eventAt`/`ownEvents` 同批），仍可用——`_eventsOf` 的双形读取保留。
+  - `session.header`/`session.id`/`session.append`、`session/event`/`session/disposed` 事件签名不变；`tool/call`、`user/message` 数据形不变（`source.kind === "user"` 过滤依旧正确——`approval.setPolicy` 的切换通知在 0.1.7 改成 `source.kind: "user-approval"`，恰好被我们的过滤排除）。
+  - `permissionPresets` 的 Config 表 schema 未变（`name`/`description` 仍可选），`names` getter / `resolve()` 形状未变；但 0.1.7 新增**保留字 `auto` / `custom`**——预设 key 不可再用这两个（构造期直接 throw），`auto` 是实验性的 per-call review 预设（`registerAuto`），且出厂默认表只剩 workspace-write / danger-full-access。我们的 `cordis.patch.yml` 整表覆盖不受影响，key 避开保留字即可。
+  - `commands.register` 新增**可选** `definitionId`（缺省合法）；`systemPrompt.context({name,order,text})` 未变（`context.agent` 来自 dsh-agent 对 AssembleContext 的模块增强，仍在）；`sessionTitle.get(session)`、`agentDefaultModel.currentSelection()`、`sessionPersistence.locate(header)`、`sandboxPolicy.defaultMode`、`llm.listProviders/listModels` 全部原样。
+  - `agent/created` 从 `@mode emit` 改为 **`@mode serial`**：监听器按注册顺序被 await，抛错/返回 rejected Promise 会**使创建失败**。我们的监听器同步且全包 try/catch，合规；**以后改这个监听器绝不能抛错或返回 Promise**。`agent/session-start` 事件已删除（本插件未用）。
+  - client 槽位：`settings.section`（id/order/label）与 `conversation.view` 契约未变（owner props 多了 `inspectCall`/`openView` 等，多余 prop 无害）；`SessionStandardProps.useSession` 仍在、`SessionSnapshot.sessionId` 叶子保留（0.1.7 另给 `props.sessionId`，可选用）；Remote 返回信封统一为 `RemoteResult`（`{ok,value}|{ok,error}`），被 client `pick()` 的多形解包覆盖。
+  - client bundle 注册契约（`__ModuleLoader__.load({id,factory})`、`exports.inject=["slots","remote"]`、id = 包名）未变；`Remote`/`TypertRemoteService`/`markRemoteMethod` 驱动方式未变，`remoteMethods` 描述符形状未变（gateway 0.1.5 与 0.1.7 的消费代码逐行同形）。
+- **0.1.7 的 UI 搬迁**（只影响 glyph 修补，见第 8 节）：`/permission` 菜单与 composer 触发按钮从 `dsh-client-ui-conversation`（`PermissionSelect` 已删除）搬到独立包 `dsh-client-ui-permission-presets`，composer 里挂新 slot `conversation.input.permission`；菜单仍是同一 Menu 原语（`button[role=menuitem]` + itemIcon span）。
+- **依赖对齐**：0.1.7 宿主的 cordis 是 4.0.4、typert-protocol 是 0.1.7-rc.1。已验证插件 node_modules 里的旧副本（cordis 4.0.1 / typert-protocol 0.1.1-rc.2）在 0.1.7 下照常工作（`Service.init` 等符号是 `Symbol.for` 全局共享；`bindTypertRemote` 的 `ctx.invocation` accessor 是 0.1.7 新增的可选面，旧副本没有也无影响）；如遇漂移按第 9 节对齐即可。
+- **验证工具**：`scripts/check-typert-manifest.mjs`（已挂进 `npm run check`）——镜像两代 loader/registry 的 codec 校验器跑 manifest、从真实 client.js 提取 CLIENT_REMOTE 做 id/参数/typeSymbol 对齐检查；设 `DSH_TYPERT_REGISTRY`（可加 `DSH_TYPERT_REGISTRY_2`）指向真实安装的 `@deepseek-ai/dsh-typert-registry/lib/index.js` 时，还会用**真注册表**跑一遍注册。本次修复已用 0.1.5-rc.3 与 0.1.7-rc.1 两代真注册表验证通过（Host manifest + Client descriptors 双双接受）。
+
 ## 开发 / 验证
 
 ```bash
-npm run check            # node --check index.js client.js typert.host.js scripts/patch-glyph.mjs
+npm run check            # node --check 全部脚本 + scripts/check-typert-manifest.mjs 双代 Typert 契约冒烟
 dsh plugin --profile web add /path/to/dsh-agent-approval   # 安装/重装到本机 DSH profile
 npm run patch:glyph      # 可选：权限菜单图标（幂等）
 ```
@@ -212,6 +232,7 @@ npm run patch:glyph      # 可选：权限菜单图标（幂等）
 6. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
 7. 设置页加一条 allow 规则（如工具 `pwsh` + match 子串）→ 命中的提权**不再起审批子代理**，审计 model 列显示 `rule`；模型批准的提权在同一会话内以完全相同参数再次发起 → 直接放行，model 列显示 `trust`；「审批」tab 审计行点「加白」→ 规则表新增对应 allow 规则。
 8. 审批模型 Provider 切到 **TypeSafe Jev**（第 4b 节）：未配 Key 时提权应立即 fail-closed 拒绝并记录 `unavailable`（理由注明缺 Key）；配好 Key（或设 `TYPESAFE_API_KEY`）后模型判定应亚秒级完成、审计 model 列显示实际版本（如 `jev(jev-1.13.0)`）、理由列为概率合成文本；把置信度阈值调到 0.99 → 大概率低置信 `unavailable`（既不批准也不记拒绝）；Endpoint 指向不存在的主机 → 网络错误 `unavailable`；规则表命中的提权在 Jev 模式下**依旧短路**（不发 HTTP 请求）。
+9. （DSH 0.1.7-rc.1 宿主，见第 10 节）重启后 `/permission` 菜单与设置页正常打开即证明 codec 双格式注册成功（旧版 ≤1.6.0 在 0.1.7 上这两处直接死）；权限菜单行的盾牌图标若缺失只影响观感（glyph-set 守卫跨代 CSS 类名），功能不受影响。
 
 ## 发布
 

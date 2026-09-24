@@ -92,7 +92,7 @@ window.__ModuleLoader__.load({
    draws the same shield + AI-star glyph patch-glyph.mjs used, as a
    currentColor mask so hover/selected/disabled colors all follow the shell.
    Scope guard: only menus that already render the official glyph set
-   (sibling rows carry span._itemIcon_*) qualify — the composer /permission
+   (sibling rows carry the Menu primitive's itemIcon span) qualify — the composer /permission
    menu does; the settings PermissionRow dropdown (settings.general 权限 row,
    portaled to <body>) renders NO icons for any preset, so an icon there
    would be an uninvited extra and is deliberately left unmarked. */
@@ -156,17 +156,20 @@ window.__ModuleLoader__.load({
         //    inside button[role=menuitem]; an icon-less row starts at the label.
         //    Glyph-set guard: only mark our row in menus where the official
         //    presets already render their permissionGlyphs (sibling rows carry
-        //    span[class*="_itemIcon_"] — the CSS-modules build keeps the source
-        //    class name as a substring). The composer /permission menu
-        //    qualifies; the settings PermissionRow dropdown (portaled to
-        //    <body>, no item icons for any preset) does NOT, so the glyph no
-        //    longer leaks into the settings page. (The selected-row checkmark
-        //    svg is class "_check_", not "_itemIcon_", so it cannot fake the
-        //    guard.)
+        //    the Menu primitive's icon span). The class-name substring is
+        //    "itemIcon" (v1.7.0, widened from "_itemIcon_"): CSS-modules compiles
+        //    the source name differently across host generations
+        //    (`_itemIcon_<hash>_` vs `<hash>_itemIcon`), and the Menu moved from
+        //    dsh-client-ui-conversation to dsh-client-ui-permission-presets in
+        //    0.1.7-rc.1. The composer /permission menu qualifies; the settings
+        //    PermissionRow dropdown (portaled to <body>, no item icons for any
+        //    preset) does NOT, so the glyph no longer leaks into the settings
+        //    page. (The selected-row checkmark svg is class "_check_", not
+        //    "itemIcon", so it cannot fake the guard.)
         const menus = document.querySelectorAll('[role="menu"]');
         const glyphMenus = [];
         for (let i = 0; i < menus.length; i++) {
-          if (menus[i].querySelector('span[class*="_itemIcon_"]') !== null) glyphMenus.push(menus[i]);
+          if (menus[i].querySelector('span[class*="itemIcon"]') !== null) glyphMenus.push(menus[i]);
         }
         const items = document.querySelectorAll('[role="menu"] button[role="menuitem"]');
         for (let i = 0; i < items.length; i++) {
@@ -220,22 +223,25 @@ window.__ModuleLoader__.load({
     // client assembly mounts only the official namespaces, so a plugin must
     // mount its own. Mirrors the invocations in typert.host.js (id,
     // service/namespace/method). zod is not requirable in the browser module
-    // loader, so codecs use passthrough schemas — the runtime contract only
-    // requires typeSymbol + schema.parse().
+    // loader, so codecs use passthrough schemas. The wire contract spans two
+    // host generations (v1.7.0): the client Remote registry validates
+    // `codec.schema.parse` on DSH ≤ 0.1.5-rc.3 but a `codec.create()` factory
+    // on 0.1.7-rc.1+ ("strict codec has no create() factory" kills the mount),
+    // so every codec carries BOTH fields over the same passthrough schema.
     const passthrough = () => ({ parse: (v) => v });
+    const strictCodec = (typeSymbol) => {
+      const schema = passthrough();
+      return { mode: "strict", typeSymbol, schema, create: () => schema };
+    };
     const param = (typeSymbol) => [
       {
         name: "request",
         wire: "request",
         source: "json",
-        codec: { mode: "strict", typeSymbol, schema: passthrough() },
+        codec: strictCodec(typeSymbol),
       },
     ];
-    const result = (typeSymbol) => ({
-      mode: "strict",
-      typeSymbol,
-      schema: passthrough(),
-    });
+    const result = (typeSymbol) => strictCodec(typeSymbol);
     const CLIENT_REMOTE = {
       package: "dsh-agent-approval",
       descriptors: [

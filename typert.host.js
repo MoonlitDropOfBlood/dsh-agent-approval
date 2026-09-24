@@ -12,6 +12,17 @@
  *
  * Result schemas are STRICT: every Host return value must match exactly
  * (fields present, types correct), or the gateway validation fails.
+ *
+ * Codec wire format spans two host generations (v1.7.0): DSH ≤ 0.1.5-rc.3
+ * validates and parses through `codec.schema` (a zod v4 instance — the
+ * typert-loader checked `"_zod" in schema`, the gateway called
+ * `codec.schema.parse`), while DSH 0.1.7-rc.1+ replaced that contract with a
+ * `codec.create()` FACTORY (the loader now rejects any codec "with no create()
+ * factory"; the gateway calls `codec.create().parse`). Every codec below
+ * therefore carries BOTH fields: `schema` keeps 0.1.5 loading, `create` keeps
+ * 0.1.7 loading, and both generations parse through the same zod instance.
+ * Removing either field breaks one generation at startup (the typert-loader
+ * throw is why 0.1.7 refused this manifest before v1.7.0).
  */
 
 import { z } from "zod";
@@ -230,6 +241,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalStateResult",
         schema: stateResultSchema,
+        create: () => stateResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -248,6 +260,7 @@ export const TYPERT = {
             mode: "strict",
             typeSymbol: "dsh-agent-approval#AgentApprovalSetModelRequest",
             schema: _agentApproval_setModel_parameter_0$schema,
+            create: () => _agentApproval_setModel_parameter_0$schema,
           },
         },
       ],
@@ -255,6 +268,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalSetModelResult",
         schema: setModelResultSchema,
+        create: () => setModelResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -273,6 +287,7 @@ export const TYPERT = {
             mode: "strict",
             typeSymbol: "dsh-agent-approval#AgentApprovalSetJevRequest",
             schema: _agentApproval_setJevConfig_parameter_0$schema,
+            create: () => _agentApproval_setJevConfig_parameter_0$schema,
           },
         },
       ],
@@ -280,6 +295,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalSetJevResult",
         schema: setJevResultSchema,
+        create: () => setJevResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -298,6 +314,7 @@ export const TYPERT = {
             mode: "strict",
             typeSymbol: "dsh-agent-approval#AgentApprovalSetTimeoutRequest",
             schema: _agentApproval_setApprovalTimeout_parameter_0$schema,
+            create: () => _agentApproval_setApprovalTimeout_parameter_0$schema,
           },
         },
       ],
@@ -305,6 +322,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalSetTimeoutResult",
         schema: setTimeoutResultSchema,
+        create: () => setTimeoutResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -323,6 +341,7 @@ export const TYPERT = {
             mode: "strict",
             typeSymbol: "dsh-agent-approval#AgentApprovalToggleRequest",
             schema: _agentApproval_toggle_parameter_0$schema,
+            create: () => _agentApproval_toggle_parameter_0$schema,
           },
         },
       ],
@@ -330,6 +349,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalToggleResult",
         schema: toggleResultSchema,
+        create: () => toggleResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -348,6 +368,7 @@ export const TYPERT = {
             mode: "strict",
             typeSymbol: "dsh-agent-approval#AgentApprovalAddRuleRequest",
             schema: _agentApproval_addRule_parameter_0$schema,
+            create: () => _agentApproval_addRule_parameter_0$schema,
           },
         },
       ],
@@ -355,6 +376,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalRulesResult",
         schema: addRuleResultSchema,
+        create: () => addRuleResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -373,6 +395,7 @@ export const TYPERT = {
             mode: "strict",
             typeSymbol: "dsh-agent-approval#AgentApprovalRemoveRuleRequest",
             schema: _agentApproval_removeRule_parameter_0$schema,
+            create: () => _agentApproval_removeRule_parameter_0$schema,
           },
         },
       ],
@@ -380,6 +403,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalRulesResult",
         schema: removeRuleResultSchema,
+        create: () => removeRuleResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -398,6 +422,7 @@ export const TYPERT = {
             mode: "strict",
             typeSymbol: "dsh-agent-approval#AgentApprovalSessionRecordsRequest",
             schema: _agentApproval_sessionRecords_parameter_0$schema,
+            create: () => _agentApproval_sessionRecords_parameter_0$schema,
           },
         },
       ],
@@ -405,6 +430,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalSessionRecordsResult",
         schema: sessionRecordsResultSchema,
+        create: () => sessionRecordsResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -419,6 +445,7 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalDirectoryResult",
         schema: directoryResultSchema,
+        create: () => directoryResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },

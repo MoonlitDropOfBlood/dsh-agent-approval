@@ -62,7 +62,7 @@
 dsh plugin --profile web add /path/to/dsh-agent-approval
 
 # 正式发布：从 GitHub Release tarball 安装
-dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.6.0/dsh-agent-approval-1.6.0.tgz
+dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-approval/releases/download/v1.7.0/dsh-agent-approval-1.7.0.tgz
 ```
 
 重启 DSH 后：设置面板出现 **Agent 审批** 页；`/permission` 菜单出现第四项 **Agent 审批**。
@@ -87,10 +87,11 @@ dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-app
 ```
 dsh-agent-approval/
 ├── index.js            # Host 半：AgentApprovalService（审批瀑布抢占 + spawn 审批 Agent + 审计）
-├── client.js           # Client 半：设置页「Agent 审批」+ 输入框开关 UI bundle
-├── typert.host.js      # Typert Host manifest（agentApproval 6 个方法的描述）
+├── client.js           # Client 半：设置页「Agent 审批」+ 会话「审批」审计标签页 bundle
+├── typert.host.js      # Typert Host manifest（agentApproval 9 个 Remote 方法的描述）
 ├── cordis.patch.yml      # dsh bundle patch（挂载行 + permission 预设表覆盖）
 ├── scripts/patch-glyph.mjs # 可选：权限菜单图标补丁（标准安装不自动执行）
+├── scripts/check-typert-manifest.mjs # npm run check 用：双代 Typert codec 契约冒烟
 ├── .github/workflows/  # GitHub Actions 发布
 ├── AGENTS.md           # 面向 AI agent 的开发指南（含踩坑）
 └── LICENSE             # MIT
@@ -99,10 +100,12 @@ dsh-agent-approval/
 ## 开发
 
 ```bash
-npm run check           # node --check index.js client.js typert.host.js
+npm run check           # node --check 全部脚本 + 双代 Typert 契约冒烟（scripts/check-typert-manifest.mjs）
 dsh plugin --profile web add /path/to/dsh-agent-approval   # 安装/重装到本机 DSH profile
 npm run patch:glyph     # 可选：权限菜单图标
 ```
+
+**兼容性**：支持 DSH 0.1.5-rc.3 ~ 0.1.7-rc.1。v1.7.0 起 Typert manifest / Client Remote 描述符的每个 codec 同时携带 `schema`（≤0.1.5 的 zod 契约）与 `create()` 工厂（0.1.7 的新契约），任一宿主代际都能注册；旧版本（≤1.6.0）在 0.1.7 上会被 typert-loader 以 "has no create() factory" 拒绝，Remote 全部失效。
 
 详见 [AGENTS.md](AGENTS.md)——记录了 DSH 正式插件（Host/Client/Typert 三件套）的完整机制、审批瀑布 prepend 抢占与结构化子代理裁决的踩坑。
 
