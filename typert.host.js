@@ -41,6 +41,15 @@ const modelRouteSchema = z
   })
   .readonly();
 
+const jevConfigSchema = z
+  .object({
+    apiKey: z.string(),
+    endpoint: z.string(),
+    model: z.string(),
+    confidence: z.number(),
+  })
+  .readonly();
+
 const enabledSessionSchema = z
   .object({
     id: z.string(),
@@ -63,6 +72,7 @@ const ruleSchema = z
 const stateValueSchema = z
   .object({
     model: modelRouteSchema,
+    jev: jevConfigSchema,
     timeoutMs: z.number(),
     enabledSessions: z.array(enabledSessionSchema).readonly(),
     rules: z.array(ruleSchema).readonly(),
@@ -72,6 +82,12 @@ const stateValueSchema = z
 const setModelValueSchema = z
   .object({
     model: modelRouteSchema,
+  })
+  .readonly();
+
+const setJevValueSchema = z
+  .object({
+    jev: jevConfigSchema,
   })
   .readonly();
 
@@ -152,6 +168,7 @@ function okResult(valueSchema) {
 
 const stateResultSchema = okResult(stateValueSchema);
 const setModelResultSchema = okResult(setModelValueSchema);
+const setJevResultSchema = okResult(setJevValueSchema);
 const setTimeoutResultSchema = okResult(setTimeoutValueSchema);
 const toggleResultSchema = okResult(toggleValueSchema);
 const addRuleResultSchema = okResult(rulesValueSchema);
@@ -164,6 +181,13 @@ const directoryResultSchema = okResult(directoryValueSchema);
 const _agentApproval_setModel_parameter_0$schema = z.object({
   provider: z.string(),
   model: z.string(),
+});
+
+const _agentApproval_setJevConfig_parameter_0$schema = z.object({
+  apiKey: z.string(),
+  endpoint: z.string(),
+  model: z.string(),
+  confidence: z.number(),
 });
 
 const _agentApproval_setApprovalTimeout_parameter_0$schema = z.object({
@@ -231,6 +255,31 @@ export const TYPERT = {
         mode: "strict",
         typeSymbol: "dsh-agent-approval#AgentApprovalSetModelResult",
         schema: setModelResultSchema,
+      },
+      sourceLocation: { file: "index.js", line: 1, column: 1 },
+    },
+    {
+      id: "dsh-agent-approval#agentApproval/setJevConfig",
+      service: "agentApproval",
+      namespace: "agentApproval",
+      method: "setJevConfig",
+      invocation: { kind: "direct" },
+      parameters: [
+        {
+          name: "request",
+          wire: "request",
+          source: "json",
+          codec: {
+            mode: "strict",
+            typeSymbol: "dsh-agent-approval#AgentApprovalSetJevRequest",
+            schema: _agentApproval_setJevConfig_parameter_0$schema,
+          },
+        },
+      ],
+      result: {
+        mode: "strict",
+        typeSymbol: "dsh-agent-approval#AgentApprovalSetJevResult",
+        schema: setJevResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -390,17 +439,25 @@ export const TYPERT = {
             kind: "method",
             name: "getState",
             signature: "@Remote('getState') async getState(): Promise<AgentApprovalStateResult>",
-            summary: "Snapshot for the Settings page (model route, timeout, enabled sessions, rules).",
+            summary: "Snapshot for the Settings page (model route, Jev backend, timeout, enabled sessions, rules).",
             jsDoc:
-              "/**\n * Return the judge model route, timeout, enabled sessions (id + session-list title + workspace cwd), and the rule table.\n * @returns success or a business failure.\n */",
+              "/**\n * Return the judge model route, the TypeSafe Jev backend settings, timeout, enabled sessions (id + session-list title + workspace cwd), and the rule table.\n * @returns success or a business failure.\n */",
           },
           {
             kind: "method",
             name: "setModel",
             signature: "@Remote('setModel') async setModel(request: AgentApprovalSetModelRequest): Promise<AgentApprovalSetModelResult>",
-            summary: "Set the judge model route (empty strings = inherit the requesting session's).",
+            summary: "Set the judge model route (empty strings = inherit the requesting session's; provider 'typesafe' selects the Jev backend).",
             jsDoc:
-              "/**\n * Set provider/model used by the approval subagent; empty strings clear the override.\n * @param request - { provider, model }.\n * @returns the stored route.\n */",
+              "/**\n * Set provider/model used by the approval judge; empty strings clear the override. The synthetic provider 'typesafe' routes judging through the TypeSafe Jev HTTP API instead of a harness subagent.\n * @param request - { provider, model }.\n * @returns the stored route.\n */",
+          },
+          {
+            kind: "method",
+            name: "setJevConfig",
+            signature: "@Remote('setJevConfig') async setJevConfig(request: AgentApprovalSetJevRequest): Promise<AgentApprovalSetJevResult>",
+            summary: "Set the TypeSafe Jev backend settings (API key, endpoint, model, confidence gate; persisted).",
+            jsDoc:
+              "/**\n * Update the Jev backend settings used when the judge provider is 'typesafe'. Only provided fields change; confidence (the fail-closed gate) is clamped to [0.01, 0.99].\n * @param request - { apiKey, endpoint, model, confidence }.\n * @returns the stored Jev settings.\n */",
           },
           {
             kind: "method",
@@ -463,6 +520,21 @@ export const TYPERT = {
               "export interface AgentApprovalModelRoute {\n    readonly provider: string;\n    readonly model: string;\n}",
           },
           {
+            name: "AgentApprovalJevConfig",
+            declaration:
+              "export interface AgentApprovalJevConfig {\n    readonly apiKey: string;\n    readonly endpoint: string;\n    readonly model: string;\n    readonly confidence: number;\n}",
+          },
+          {
+            name: "AgentApprovalSetJevRequest",
+            declaration:
+              "export interface AgentApprovalSetJevRequest {\n    readonly apiKey: string;\n    readonly endpoint: string;\n    readonly model: string;\n    readonly confidence: number;\n}",
+          },
+          {
+            name: "AgentApprovalSetJevResult",
+            declaration:
+              "export type AgentApprovalSetJevResult = { ok: true; value: { readonly jev: AgentApprovalJevConfig } } | { ok: false; error: { code: string; message?: string } };",
+          },
+          {
             name: "AgentApprovalEnabledSession",
             declaration:
               "export interface AgentApprovalEnabledSession {\n    readonly id: string;\n    readonly title: string;\n    readonly cwd: string;\n}",
@@ -480,7 +552,7 @@ export const TYPERT = {
           {
             name: "AgentApprovalStateValue",
             declaration:
-              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n}",
+              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly jev: AgentApprovalJevConfig;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n}",
           },
           {
             name: "AgentApprovalSessionRecordsRequest",

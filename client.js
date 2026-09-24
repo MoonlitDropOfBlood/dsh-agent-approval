@@ -12,10 +12,11 @@
  *      deleted. Rows offer the one-click「加白」rule shortcut.
  *
  *   2. A "Agent 审批" page in the Settings panel (`settings.section`):
- *      approval model picker (provider + model, or the harness default),
- *      judge timeout setting (fail-closed), the list of sessions with the
- *      mode enabled (session-list title + workspace), and the allow/deny
- *      rule table.
+ *      approval model picker (provider + model, the harness default, or the
+ *      TypeSafe Jev direct HTTP backend with its API key / endpoint /
+ *      confidence-gate settings), judge timeout setting (fail-closed), the
+ *      list of sessions with the mode enabled (session-list title +
+ *      workspace), and the allow/deny rule table.
  *
  * Session-level on/off lives in the /permission menu (the "Agent 审批"
  * preset, registered by the package's cordis.patch.yml bundle patch) and the
@@ -257,6 +258,15 @@ window.__ModuleLoader__.load({
           result: result("dsh-agent-approval#AgentApprovalSetModelResult"),
         },
         {
+          id: "dsh-agent-approval#agentApproval/setJevConfig",
+          service: "agentApproval",
+          namespace: "agentApproval",
+          method: "setJevConfig",
+          invocation: { kind: "direct" },
+          parameters: param("dsh-agent-approval#AgentApprovalSetJevRequest"),
+          result: result("dsh-agent-approval#AgentApprovalSetJevResult"),
+        },
+        {
           id: "dsh-agent-approval#agentApproval/setApprovalTimeout",
           service: "agentApproval",
           namespace: "agentApproval",
@@ -413,6 +423,16 @@ window.__ModuleLoader__.load({
         const setModel = modelSlot[1];
         const timeoutSlot = React.useState("");
         const setTimeoutDraft = timeoutSlot[1];
+        // Jev backend drafts (edited in the Jev card shown when the judge
+        // provider is the synthetic "typesafe" entry).
+        const jevKeySlot = React.useState("");
+        const setJevKey = jevKeySlot[1];
+        const jevEndpointSlot = React.useState("");
+        const setJevEndpoint = jevEndpointSlot[1];
+        const jevModelSlot = React.useState("");
+        const setJevModel = jevModelSlot[1];
+        const jevConfSlot = React.useState("0.5");
+        const setJevConf = jevConfSlot[1];
         const noteSlot = React.useState("");
         const note = noteSlot[0];
         const setNote = noteSlot[1];
@@ -431,6 +451,11 @@ window.__ModuleLoader__.load({
               setProvider(s.model.provider);
               setModel(s.model.model);
               setTimeoutDraft(String(s.timeoutMs));
+              // A not-yet-restarted old host sends no `jev` field — keep drafts.
+              setJevKey(s.jev && typeof s.jev.apiKey === "string" ? s.jev.apiKey : "");
+              setJevEndpoint(s.jev && typeof s.jev.endpoint === "string" ? s.jev.endpoint : "");
+              setJevModel(s.jev && typeof s.jev.model === "string" ? s.jev.model : "");
+              setJevConf(s.jev && typeof s.jev.confidence === "number" ? String(s.jev.confidence) : "0.5");
             })
             .catch((e) => setNote("无法读取状态：" + (e && e.message ? e.message : String(e))));
         };
@@ -455,6 +480,28 @@ window.__ModuleLoader__.load({
             .then(() => {
               refresh();
               setNote("审批模型已保存");
+            })
+            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+        };
+        const jevKey = jevKeySlot[0];
+        const jevEndpoint = jevEndpointSlot[0];
+        const jevModel = jevModelSlot[0];
+        const jevConf = jevConfSlot[0];
+        const saveJev = () => {
+          if (typeof remote.setJevConfig !== "function") {
+            setNote("Host 半未更新（缺少 setJevConfig）：请重装本插件并重启 DSH。");
+            return;
+          }
+          const conf = Number(jevConf);
+          if (!Number.isFinite(conf) || conf <= 0 || conf >= 1) {
+            setNote("置信度阈值必须是 0–1 之间的小数（如 0.5）");
+            return;
+          }
+          remote
+            .setJevConfig({ apiKey: jevKey, endpoint: jevEndpoint, model: jevModel, confidence: conf })
+            .then(() => {
+              refresh();
+              setNote("Jev 配置已保存");
             })
             .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
         };
@@ -520,19 +567,30 @@ window.__ModuleLoader__.load({
             .catch(() => {});
         };
 
+        // The synthetic "typesafe" provider routes judging through the
+        // TypeSafe Jev HTTP API — it is not part of the harness directory.
         const providerOptions = [{ id: "", name: "默认（Harness 默认模型）" }].concat(
+          [{ id: "typesafe", name: "TypeSafe Jev（决策模型·直连 API）" }],
           dir ? dir.providers : [],
         );
-        const modelOptions = [{ provider: "", id: "", name: "默认（Harness 默认模型）" }].concat(
-          dir && dir.models ? dir.models.filter((m) => m.provider === provider) : [],
-        );
+        const modelOptions =
+          provider === "typesafe"
+            ? [
+                { provider: "typesafe", id: "jev-latest", name: "jev-latest（跟随最新版本）" },
+                { provider: "typesafe", id: "jev-1.13.0", name: "jev-1.13.0（锁定版本）" },
+              ]
+            : [{ provider: "", id: "", name: "默认（Harness 默认模型）" }].concat(
+                dir && dir.models ? dir.models.filter((m) => m.provider === provider) : [],
+              );
         const defaultHint =
-          dir && dir.defaultSelection
-            ? "未配置时使用 Harness 默认模型；当前默认路由：" +
-              dir.defaultSelection.provider +
-              " / " +
-              dir.defaultSelection.model
-            : "未配置时使用 Harness 默认模型路由";
+          provider === "typesafe"
+            ? "当前审批判定直连 TypeSafe Jev API，不经过 Harness 模型路由；下方 Jev 配置在该模式下生效。"
+            : dir && dir.defaultSelection
+              ? "未配置时使用 Harness 默认模型；当前默认路由：" +
+                dir.defaultSelection.provider +
+                " / " +
+                dir.defaultSelection.model
+              : "未配置时使用 Harness 默认模型路由";
 
         return h(
           "div",
@@ -568,7 +626,7 @@ window.__ModuleLoader__.load({
                     value: provider,
                     onChange: (e) => {
                       setProvider(e.target.value);
-                      setModel("");
+                      setModel(e.target.value === "typesafe" ? "jev-latest" : "");
                     },
                   },
                   providerOptions.map((p) =>
@@ -586,7 +644,7 @@ window.__ModuleLoader__.load({
                     className: "aapr-select",
                     value: model,
                     onChange: (e) => setModel(e.target.value),
-                    disabled: dir === null,
+                    disabled: dir === null && provider !== "typesafe",
                   },
                   modelOptions.map((m) =>
                     h("option", { key: m.provider + "/" + m.id, value: m.id }, m.id === "" ? m.name : m.name + "（" + m.id + "）"),
@@ -597,6 +655,75 @@ window.__ModuleLoader__.load({
             ),
             h("div", { className: "aapr-muted" }, defaultHint),
           ),
+          provider === "typesafe"
+            ? h(
+                "div",
+                { className: "aapr-card" },
+                h("h3", null, "TypeSafe Jev 配置"),
+                h(
+                  "div",
+                  { className: "aapr-muted" },
+                  "Jev 是结构化决策模型（System One）：审批时直连 TypeSafe API，不创建审批子会话，毫秒级返回带校准概率的裁决。审计「理由」由概率分布合成（Jev 本身不生成文字）；置信度低于阈值时按 fail-closed 处理（记 unavailable，不批准也不记拒绝）。对中文任务上下文的准确率略低于英语。API Key 明文保存在本机 config.json；留空时使用环境变量 TYPESAFE_API_KEY。",
+                ),
+                h(
+                  "div",
+                  { className: "aapr-row" },
+                  h(
+                    "label",
+                    null,
+                    "API Key：",
+                    h("input", {
+                      className: "aapr-input",
+                      type: "password",
+                      placeholder: "TYPESAFE_API_KEY",
+                      value: jevKey,
+                      onChange: (e) => setJevKey(e.target.value),
+                    }),
+                  ),
+                  h(
+                    "label",
+                    null,
+                    "模型：",
+                    h("input", {
+                      className: "aapr-input",
+                      placeholder: "jev-latest",
+                      value: jevModel,
+                      onChange: (e) => setJevModel(e.target.value),
+                    }),
+                  ),
+                ),
+                h(
+                  "div",
+                  { className: "aapr-row" },
+                  h(
+                    "label",
+                    null,
+                    "Endpoint：",
+                    h("input", {
+                      className: "aapr-input aapr-input-wide",
+                      placeholder: "https://api.typesafe.ai/v1/systemone",
+                      value: jevEndpoint,
+                      onChange: (e) => setJevEndpoint(e.target.value),
+                    }),
+                  ),
+                  h(
+                    "label",
+                    null,
+                    "置信度阈值：",
+                    h("input", {
+                      className: "aapr-input",
+                      type: "number",
+                      step: "0.05",
+                      min: "0.01",
+                      max: "0.99",
+                      value: jevConf,
+                      onChange: (e) => setJevConf(e.target.value),
+                    }),
+                  ),
+                  h(ui.Button, { variant: "primary", size: "sm", onClick: saveJev }, "保存"),
+                ),
+              )
+            : null,
           h(
             "div",
             { className: "aapr-card" },

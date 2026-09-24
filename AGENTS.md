@@ -10,7 +10,7 @@
 - 审批 Agent 在**独立会话**里运行：零父级上下文、全局工具全部空白（`toolFilter: {allow:[]}`）、审批策略被委派机制钉死为 `never`（不可能递归再审批），必须通过 `structured_output` 结构化工具给出裁决：`{ decision: approve|reject, riskLevel, rationale }`。
 - **风险即拒绝**：破坏性 / 不可逆 / 越界 / 理由与实际参数不符 → `reject`；只有"安全、可逆、与任务相符、理由诚实"才 `approve`。
 - **Fail-closed**：审批 Agent 启动失败、超时、结果不合法、请求被取消 → 一律按拒绝处理（`unavailable`/`cancelled`），绝不静默放行。
-- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model，或 Harness 默认模型）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化）。**审计不在这里**：会话窗口顶部新增**「审批」标签页**（`conversation.view` ring，紧邻「轨迹」；chat=0 / trajectory=10 / 审批=11），按会话折叠展示审批记录（**倒序、最新在上**；结论/风险/模型/耗时/理由，悬停看完整理由与工具参数，行内可一键「加白」）——记录存在**会话目录内的独立旁路文件**（见第 6 节）。
+- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model、Harness 默认模型，或 **TypeSafe Jev 直连后端**，见第 4b 节）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化）。**审计不在这里**：会话窗口顶部新增**「审批」标签页**（`conversation.view` ring，紧邻「轨迹」；chat=0 / trajectory=10 / 审批=11），按会话折叠展示审批记录（**倒序、最新在上**；结论/风险/模型/耗时/理由，悬停看完整理由与工具参数，行内可一键「加白」）——记录存在**会话目录内的独立旁路文件**（见第 6 节）。
 - 输入框 `/permission` 菜单的「Agent 审批」预设 + `/agent-approval on|off` 命令为当前会话开关（**刻意没有 composer chip**——开关本就属于权限菜单，菜单旁边再放一个属冗余，已移除）；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
 
 ## 目录结构
@@ -99,6 +99,19 @@ const run = await this.ctx.subagents.start("spawn", {
 - **审批员自身约束消歧（v1.3.5 修复的真实误杀）**：审批员子会话被委派机制钉死 `approval/policy: never`，harness 会向它注入运行时上下文 "Approval prompts are disabled in this session…"。小模型（flash）曾把这句**关于审批员自己**的约束误读为**请求方会话**的属性，两次以此为由拒绝了本该批准的操作（见 records.jsonl 2026-08-21 / 2026-08-22 两条 rejected）。因此 persona 与提示词都显式声明："你自身的 never 策略与固定作用域只约束你自己，绝不可作为请求方会话的属性或拒绝理由"。改提示词时**不要删掉这句**。
 - **裁决一致性口径**：判"操作 vs 用户任务"的**客观对齐**，不依赖请求方理由的措辞水平——理由只是辅助证据：操作本身明显安全且与任务相符时，理由写得简略**不拒**；但理由与实际参数造假/不符仍**照拒**（读过审核标准的 agent 不能靠文笔获得优待）。
 - **开发流程口径**（端到端任务不被卡死的关键）：提权档位只有粗粒度两档，审批员**判实际操作而非档位名**——项目自带的安装/构建/部署脚本写其文档指定的安装路径（如工具自身 profile 目录）、覆盖自身已安装的文件（可从源码再生成）、读调试所需的工具自有配置/日志，都算"任务明确所需"可 approve；但**修改操作系统或其他应用的数据**仍一律 reject。
+
+### 4b. TypeSafe Jev 直连判定后端（v1.6.0 起）
+
+设置页 Provider 选 **TypeSafe Jev**（合成 provider id `typesafe`，**不在** `llm.listProviders()` 目录里——Jev 是 "System One" 决策模型，不是聊天路由，不能走 Harness 模型注册表）。`_model.provider === "typesafe"` 时 `_judge` 在规则表/信任缓存短路之后直接走 `_judgeWithJev`，**不 spawn 子代理**：
+
+- **协议**：POST `<endpoint>`（默认 `https://api.typesafe.ai/v1/systemone`，可配第三方网关），`Authorization: Bearer <key>`，body = `{ state, model, questions }`。Key 来自 config.json 的 `jev.apiKey`（明文，本机文件）或环境变量 `TYPESAFE_API_KEY`（留空时回退）；两者都缺 → 判定直接 `unavailable`（fail-closed）。`fetch` 用 Node 全局，**无新 npm 依赖**。
+- **state**（`_jevStateOf`）：workspace / tool / statedReason / toolArguments（4000 截断）/ firstUserMessage / recentUserMessages——与子代理提示词**同一份 ground truth**（复用 `_recentUserContext`）。
+- **questions**（`JEV_QUESTIONS` 常量）：`decision` = Choice(approve/reject，**策略全部写进 criteria 描述**——Jev 按字面读指令、领域知识只能进 state+criteria)；`riskLevel` = Choice(low/medium/high)；`concreteRisk` = Noul（"是否存在具体可信风险"辅助信号，只进审计理由）。措辞口径与子代理提示词一致（含开发流程口径与误杀治理）。
+- **置信度门控**：`decision.confidence < 阈值`（默认 0.5，可配 0.01–0.99）→ `unavailable`——**对称适用**：低置信的 reject 也不记拒绝（v1.4.0 误杀治理的对称版："模型没把握就不裁决"）。
+- **结果映射**：approve → `allowed-once`（写信任缓存）；reject → `rejected`；任何畸形返回 / 非 200 / 传输故障 / 超时 → `unavailable`；取消 → `cancelled`（AbortController 联动 `req.signal`，同一 `this._timeoutMs` 竞速，`finally` 里无条件 abort 掉传输）。
+- **审计**：model 列 `jev(<served version>)`——响应体 `model` 字段会解析别名（请求 jev-latest → 记 jev-1.13.0）；理由列由概率分布合成（**Jev 不生成文字**，没有自然语言推理可记）；`childSessionId` 为空（没有子会话）。
+- **wire 同步**：`setJevConfig` invocation（index.js `markRemoteMethod` + typert.host.js `jevConfigSchema`/invocation/`AgentApprovalJevConfig` 等类型 + client.js 描述符）；`getState` 带 `jev` 字段，client 对旧 Host 缺该字段时保留空草稿降级（saveJev 还有 `typeof remote.setJevConfig === "function"` 守卫）。
+- **已知限制**（设置卡片已注明）：Jev 官方声明中日韩文本"可处理但准确率较低"（审批 state 里的中文任务上下文会打折）；early access 阶段速率限制可能变化——所有异常都归 fail-closed，不会误放行。
 
 ### 5. 规则表与会话内信任（v1.4.0 起，先于模型裁决）
 
@@ -198,6 +211,7 @@ npm run patch:glyph      # 可选：权限菜单图标（幂等）
 5. 菜单切到 danger-full-access：模式自动关闭（`permission/preset` 事件联动，立即生效）；菜单切回 Agent 审批：模式自动开启，无需手动执行命令。
 6. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
 7. 设置页加一条 allow 规则（如工具 `pwsh` + match 子串）→ 命中的提权**不再起审批子代理**，审计 model 列显示 `rule`；模型批准的提权在同一会话内以完全相同参数再次发起 → 直接放行，model 列显示 `trust`；「审批」tab 审计行点「加白」→ 规则表新增对应 allow 规则。
+8. 审批模型 Provider 切到 **TypeSafe Jev**（第 4b 节）：未配 Key 时提权应立即 fail-closed 拒绝并记录 `unavailable`（理由注明缺 Key）；配好 Key（或设 `TYPESAFE_API_KEY`）后模型判定应亚秒级完成、审计 model 列显示实际版本（如 `jev(jev-1.13.0)`）、理由列为概率合成文本；把置信度阈值调到 0.99 → 大概率低置信 `unavailable`（既不批准也不记拒绝）；Endpoint 指向不存在的主机 → 网络错误 `unavailable`；规则表命中的提权在 Jev 模式下**依旧短路**（不发 HTTP 请求）。
 
 ## 发布
 
@@ -210,4 +224,4 @@ npm run patch:glyph      # 可选：权限菜单图标（幂等）
 - 声称（claim）的范围是"该会话的**所有** approval 请求"——不止 pwsh/bash 提权，也包括任何 `tools/pre-execute` 产生的人工 ask。这是有意语义（"帮我审批"），提示词写成通用审批口径。
 - `approval.setPolicy` 会在模型上下文里注入 "changed by the user" 通知——用户确实主动开了开关，语义可接受；不要绕开它手写 `approval/policy` 事件（会丢失通知）。
 - 审批模型未配置时使用 **Harness 默认路由**（`agentDefaultModel.currentSelection()`；该可选服务缺席或解析为空时才退化为继承请求会话路由）；配置后走 `agentOptions` 精确覆盖。**刻意不跟随请求会话的模型**——审批口径必须稳定可预期，不随各会话的模型切换而漂移。
-- 审计记录（v1.5.1 起）存在**会话存储目录内的旁路文件** `<sessionDir>/agent-approval.jsonl`（经 `sessionPersistence.locate` 定位；v1.4→v1.5 迁移用 `scripts/migrate-records.mjs`，见第 6 节）；插件只持久化**设置**——审批模型与超时在 `<DSH_HOME>/agent-approval/config.json`（重启恢复，不再回落默认）。持久化失败是 best-effort 静默降级，绝不影响审批主流程。DSH 的权威审计仍在会话日志的 `approval/asked` + `approval/decided` 事件对（本插件不破坏该配对，只在瀑布层给结论）。
+- 审计记录（v1.5.1 起）存在**会话存储目录内的旁路文件** `<sessionDir>/agent-approval.jsonl`（经 `sessionPersistence.locate` 定位；v1.4→v1.5 迁移用 `scripts/migrate-records.mjs`，见第 6 节）；插件只持久化**设置**——审批模型、Jev 配置（apiKey/endpoint/model/confidence）与超时都在 `<DSH_HOME>/agent-approval/config.json`（重启恢复，不再回落默认；Key 明文保存，与模型/超时同一信任域）。持久化失败是 best-effort 静默降级，绝不影响审批主流程。DSH 的权威审计仍在会话日志的 `approval/asked` + `approval/decided` 事件对（本插件不破坏该配对，只在瀑布层给结论）。

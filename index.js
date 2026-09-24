@@ -31,6 +31,11 @@
  *      `callId`) plus the asker's stated reason. A rejection must name the
  *      concrete, credible risk the operation creates (destructive /
  *      irreversible / out-of-scope / dishonest); vague unease is approved.
+ *      v1.6.0: the judge can alternatively be the TypeSafe Jev "System One"
+ *      decision model (synthetic provider id `typesafe`) — a direct HTTP
+ *      call that answers typed Choice/Noul questions with calibrated
+ *      probabilities; a confidence below the configured gate resolves
+ *      fail-closed like any other fault (see `_judgeWithJev`).
  *
  *   3. FAIL CLOSED — any infrastructure fault, timeout, malformed verdict, or
  *      cancellation maps to the fail-closed approval outcomes
@@ -103,6 +108,60 @@ const RECORDS_SIDECAR = "agent-approval.jsonl";
  */
 const DATA_DIR = join(process.env.DSH_HOME || join(homedir(), ".dsh"), "agent-approval");
 const CONFIG_FILE = join(DATA_DIR, "config.json");
+
+/**
+ * v1.6.0: the TypeSafe Jev judge backend. Jev is a "System One" decision
+ * model (https://api.typesafe.ai/v1/systemone): it does not generate text —
+ * it answers typed questions (Choice / Score / Noul) over one `state` with
+ * calibrated probability distributions in ~70–500ms. That is exactly the
+ * approval-verdict shape, so instead of spawning a judge subagent through
+ * the harness model registry (Jev is not a chat route and cannot appear in
+ * `llm.listProviders()`), the Host half calls its HTTP API directly when the
+ * configured judge provider is the synthetic `typesafe` id. Fail-closed is
+ * preserved end to end: any transport fault, non-200, malformed answer, or a
+ * confidence below the configured gate resolves `unavailable` — never a
+ * grant, and (below the gate) not a recorded rejection either.
+ */
+const JEV_PROVIDER = "typesafe";
+const JEV_DEFAULT_MODEL = "jev-latest";
+const JEV_DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+const JEV_DEFAULT_CONFIDENCE = 0.5;
+
+/**
+ * The typed questions sent to Jev. Policy lives in the criteria descriptions
+ * (Jev reads instructions literally and injects domain knowledge only through
+ * state + criteria); the wording mirrors the subagent judge prompt's APPROVE
+ * conditions / REJECT list / 误杀治理 so both backends judge to the same
+ * standard. `decision` and `riskLevel` are Choices (discrete options +
+ * probabilities + confidence); `concreteRisk` is a Noul probe whose
+ * probability is folded into the synthesized audit rationale.
+ */
+const JEV_QUESTIONS = {
+  decision: {
+    type: "choice",
+    instructions: "Should this one-time sandbox-escalation request be approved?",
+    criteria: {
+      approve:
+        "Yes, approve once. The operation is plausibly safe, non-destructive and reversible; it is clearly required by or consistent with the user's task; the stated reason honestly matches the actual arguments; and granting it once cannot leak secrets or cause irreversible system-wide changes. The project's own documented install/build/deploy steps that place the project's own files into the tool's own documented directories, and reading tool-owned config or logs needed for the task, count as task-scoped.",
+      reject:
+        "No, reject. The operation is destructive or irreversible (mass deletion, disk formatting, registry/service/system-wide changes), exfiltrates credentials or secrets, touches resources unrelated to the task, modifies the operating system or other applications' data, hides intent behind encoded or obfuscated content, the stated reason does not match the actual arguments, or there is a concrete, credible risk — something it would destroy, leak, or change beyond the user's task.",
+    },
+  },
+  riskLevel: {
+    type: "choice",
+    instructions: "How risky is the requested operation?",
+    criteria: {
+      low: "Routine and easily reversible: reading files, or writing within the project workspace that can be regenerated or undone.",
+      medium: "Awkward to undo or touches more than the immediate task outputs, but not destructive and not security-sensitive.",
+      high: "Destructive, irreversible, system-wide, or touching credentials, secrets, or other applications' data.",
+    },
+  },
+  concreteRisk: {
+    type: "noul",
+    instructions:
+      "Does this specific operation create a concrete, credible risk — destroying data, leaking secrets or credentials, or changing the operating system, other applications, or resources beyond the user's task? Answer false when the operation is task-scoped and reversible; vague unease or an unfamiliar command is NOT a risk.",
+  },
+};
 
 /**
  * The structured verdict the judge subagent MUST produce. Constrained to the
@@ -225,6 +284,7 @@ export class AgentApprovalService extends TypertRemoteService {
   async [Service.init]() {
     markRemoteMethod(this, "getState", "getState");
     markRemoteMethod(this, "setModel", "setModel");
+    markRemoteMethod(this, "setJevConfig", "setJevConfig");
     markRemoteMethod(this, "setApprovalTimeout", "setApprovalTimeout");
     markRemoteMethod(this, "toggle", "toggle");
     markRemoteMethod(this, "addRule", "addRule");
@@ -234,6 +294,18 @@ export class AgentApprovalService extends TypertRemoteService {
 
     /** Judge model override; empty strings = use the harness default route. */
     this._model = { provider: "", model: "" };
+    /**
+     * TypeSafe Jev direct backend settings (used when `_model.provider` is
+     * the synthetic `typesafe` id). The API key lives in plaintext on this
+     * machine only (config.json, same trust domain as the rest of the
+     * settings); an empty key falls back to the TYPESAFE_API_KEY env var.
+     */
+    this._jev = {
+      apiKey: "",
+      endpoint: JEV_DEFAULT_ENDPOINT,
+      model: JEV_DEFAULT_MODEL,
+      confidence: JEV_DEFAULT_CONFIDENCE,
+    };
     /** Judge timeout in ms (clamped); a timeout resolves fail-closed. */
     this._timeoutMs = DEFAULT_TIMEOUT_MS;
     /** sessionId -> { prevSandbox?: string, prevApproval?: string } */
@@ -693,6 +765,7 @@ export class AgentApprovalService extends TypertRemoteService {
   _persistConfig() {
     const body = JSON.stringify({
       model: { provider: this._model.provider, model: this._model.model },
+      jev: this._jevShape(),
       timeoutMs: this._timeoutMs,
       rules: this._rules,
     });
@@ -718,6 +791,18 @@ export class AgentApprovalService extends TypertRemoteService {
           typeof cfg.model.model === "string"
         ) {
           this._model = { provider: cfg.model.provider, model: cfg.model.model };
+        }
+        if (cfg.jev && typeof cfg.jev === "object") {
+          if (typeof cfg.jev.apiKey === "string") this._jev.apiKey = cfg.jev.apiKey;
+          if (typeof cfg.jev.endpoint === "string" && cfg.jev.endpoint !== "") {
+            this._jev.endpoint = cfg.jev.endpoint;
+          }
+          if (typeof cfg.jev.model === "string" && cfg.jev.model !== "") {
+            this._jev.model = cfg.jev.model;
+          }
+          if (typeof cfg.jev.confidence === "number" && Number.isFinite(cfg.jev.confidence)) {
+            this._jev.confidence = Math.min(0.99, Math.max(0.01, cfg.jev.confidence));
+          }
         }
         if (typeof cfg.timeoutMs === "number" && Number.isFinite(cfg.timeoutMs)) {
           this._timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.floor(cfg.timeoutMs)));
@@ -892,6 +977,10 @@ export class AgentApprovalService extends TypertRemoteService {
    * records display — "p/m" = selected, "default(p/m)" = harness default.
    */
   _judgeRoute() {
+    if (this._model.provider === JEV_PROVIDER) {
+      const model = this._jevEffective().model;
+      return { provider: JEV_PROVIDER, model: model, label: "jev(" + model + ")" };
+    }
     if (this._model.provider !== "" && this._model.model !== "") {
       return {
         provider: this._model.provider,
@@ -957,7 +1046,13 @@ export class AgentApprovalService extends TypertRemoteService {
       return "allowed-once";
     }
 
-    // 3. The model judge.
+    // 3. The judge. The TypeSafe Jev backend is a direct HTTP call (no
+    //    subagent, no harness model route); anything else spawns the judge
+    //    child through the `spawn` provider as before.
+    if (this._model.provider === JEV_PROVIDER) {
+      return this._judgeWithJev(session, req, argsRaw, base, trustKey);
+    }
+
     const route = this._judgeRoute();
 
     let run;
@@ -1059,6 +1154,276 @@ export class AgentApprovalService extends TypertRemoteService {
     return "unavailable";
   }
 
+  // ---- the TypeSafe Jev direct backend ---------------------------------------
+
+  /**
+   * Effective Jev settings with env fallback and clamping applied. The key
+   * may come from config.json or the TYPESAFE_API_KEY environment variable;
+   * an absent key keeps the backend selected but every judgment resolves
+   * `unavailable` (fail closed) until one is configured.
+   */
+  _jevEffective() {
+    const key = String(this._jev.apiKey || process.env.TYPESAFE_API_KEY || "").trim();
+    const endpoint = String(this._jev.endpoint || "").trim() || JEV_DEFAULT_ENDPOINT;
+    const model = String(this._jev.model || "").trim() || JEV_DEFAULT_MODEL;
+    let confidence = Number(this._jev.confidence);
+    if (!Number.isFinite(confidence)) confidence = JEV_DEFAULT_CONFIDENCE;
+    confidence = Math.min(0.99, Math.max(0.01, confidence));
+    return { key: key, endpoint: endpoint, model: model, confidence: confidence };
+  }
+
+  /** Owned plain copy of the Jev settings for the wire and config.json. */
+  _jevShape() {
+    return {
+      apiKey: String(this._jev.apiKey || ""),
+      endpoint: String(this._jev.endpoint || JEV_DEFAULT_ENDPOINT),
+      model: String(this._jev.model || JEV_DEFAULT_MODEL),
+      confidence: Number(this._jev.confidence) || JEV_DEFAULT_CONFIDENCE,
+    };
+  }
+
+  /**
+   * The `state` sent to Jev: the same ground truth the subagent judge sees
+   * (workspace, exact arguments, stated reason, first + recent genuine user
+   * messages), as a named object — the shape TypeSafe recommends. All values
+   * are pre-truncated strings so the 32K state budget is respected.
+   */
+  _jevStateOf(session, req, argsRaw) {
+    let cwd = "";
+    try {
+      if (session.header && typeof session.header.cwd === "string") cwd = session.header.cwd;
+    } catch (e) {
+      /* header access is best-effort */
+    }
+    const task = this._recentUserContext(session);
+    return {
+      workspace: cwd || "(unknown)",
+      tool: String(req.toolName),
+      statedReason:
+        typeof req.reason === "string" && req.reason !== "" ? trunc(req.reason, 300) : "(none)",
+      toolArguments: argsRaw === undefined ? "(not available)" : trunc(argsRaw, 4000) || "(empty)",
+      firstUserMessage: task.first !== "" ? task.first : "(no user messages available)",
+      recentUserMessages: task.recent,
+    };
+  }
+
+  /**
+   * Judge one escalation through the Jev HTTP API (state + typed questions →
+   * calibrated probability distributions). Mirrors `_judge`'s spawn-path
+   * contract exactly — rules and the session trust cache have already run —
+   * and every abnormal shape resolves fail-closed:
+   *   - no API key / transport fault / non-200 / malformed answer → `unavailable`
+   *   - request cancelled mid-flight → `cancelled`
+   *   - overall timeout (the same `this._timeoutMs` budget) → `unavailable`
+   *   - confidence below the configured gate → `unavailable` (the model is
+   *     not sure enough to decide: never a grant, and not a recorded
+   *     rejection either — the v1.4.0 误杀治理 applies symmetrically)
+   * Jev does not generate text, so the audit rationale is synthesized from
+   * the returned distributions; the served model version (`body.model`,
+   * which resolves aliases like jev-latest) is what the audit displays.
+   */
+  async _judgeWithJev(session, req, argsRaw, base, trustKey) {
+    const cfg = this._jevEffective();
+    if (cfg.key === "") {
+      this._record(session, {
+        ...base,
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: "jev(" + cfg.model + ")",
+        rationale: "Jev backend selected but no API key configured (Settings → Agent 审批, or the TYPESAFE_API_KEY environment variable)",
+      });
+      return "unavailable";
+    }
+    if (typeof fetch !== "function") {
+      this._record(session, { ...base, outcome: "unavailable", riskLevel: "-", model: "jev(" + cfg.model + ")", rationale: "fetch is unavailable in this runtime" });
+      return "unavailable";
+    }
+
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const signal = req.signal;
+    const onAbort = () => controller.abort();
+    if (signal && typeof signal.addEventListener === "function") {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    let winner;
+    try {
+      const state = this._jevStateOf(session, req, argsRaw);
+      winner = await Promise.race([
+        this._jevRequest(cfg, state, controller.signal)
+          .then((body) => ({ kind: "result", body: body }))
+          .catch((error) => ({
+            kind: "fault",
+            error: error,
+            aborted: error && error.name === "AbortError",
+          })),
+        (signal
+          ? new Promise((resolve) => {
+              if (signal.aborted) {
+                resolve(true);
+                return;
+              }
+              signal.addEventListener("abort", () => resolve(true), { once: true });
+            })
+          : Promise.resolve(false)
+        ).then((v) => ({ kind: "aborted", aborted: v })),
+        this.ctx.timeout(this._timeoutMs).then(() => ({ kind: "timeout" })),
+      ]);
+    } finally {
+      if (signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onAbort);
+      }
+      // Whether we lost the race to timeout/cancel or the request already
+      // settled, closing the transport is always safe.
+      try {
+        controller.abort();
+      } catch (e) {
+        /* controller abort never blocks the outcome */
+      }
+    }
+    const durationMs = Date.now() - startedAt;
+
+    if (winner.kind === "result") {
+      return this._jevVerdict(session, winner.body, cfg, base, trustKey, durationMs);
+    }
+    if (winner.kind === "aborted") {
+      this._record(session, { ...base, outcome: "cancelled", riskLevel: "-", model: "jev(" + cfg.model + ")", rationale: "request cancelled while Jev was judging" });
+      return "cancelled";
+    }
+    if (winner.kind === "timeout") {
+      this._record(session, {
+        ...base,
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: "jev(" + cfg.model + ")",
+        rationale: "Jev request timed out after " + String(this._timeoutMs) + "ms (fail closed)",
+      });
+      return "unavailable";
+    }
+    if (winner.aborted) {
+      this._record(session, { ...base, outcome: "cancelled", riskLevel: "-", model: "jev(" + cfg.model + ")", rationale: "request cancelled while Jev was judging" });
+      return "cancelled";
+    }
+    this._record(session, { ...base, outcome: "unavailable", riskLevel: "-", model: "jev(" + cfg.model + ")", rationale: "Jev request failed: " + errText(winner.error) });
+    return "unavailable";
+  }
+
+  /** The single POST to the System One endpoint; resolves the parsed body. */
+  async _jevRequest(cfg, state, abortSignal) {
+    const response = await fetch(cfg.endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + cfg.key,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        state: state,
+        model: cfg.model,
+        questions: JEV_QUESTIONS,
+      }),
+      signal: abortSignal,
+    });
+    if (!response.ok) {
+      let detail = "";
+      try {
+        detail = trunc(String(await response.text()), 200);
+      } catch (e) {
+        /* body read is best-effort */
+      }
+      throw new Error("HTTP " + String(response.status) + (detail !== "" ? " " + detail : ""));
+    }
+    const body = await response.json();
+    if (!body || typeof body !== "object") throw new Error("response body is not an object");
+    return body;
+  }
+
+  /**
+   * Map a Jev response to the same outcomes the subagent path produces.
+   * Returns the waterfall outcome string; records the audit line itself.
+   */
+  _jevVerdict(session, body, cfg, base, trustKey, durationMs) {
+    const served = typeof body.model === "string" && body.model !== "" ? body.model : cfg.model;
+    const label = "jev(" + served + ")";
+    const answers = body.answers && typeof body.answers === "object" ? body.answers : {};
+    const decision = answers.decision && typeof answers.decision === "object" ? answers.decision : undefined;
+    const risk = answers.riskLevel && typeof answers.riskLevel === "object" ? answers.riskLevel : undefined;
+    const probe = answers.concreteRisk && typeof answers.concreteRisk === "object" ? answers.concreteRisk : undefined;
+
+    const choice = decision && (decision.choice === "approve" || decision.choice === "reject") ? decision.choice : undefined;
+    const confidence = decision ? Number(decision.confidence) : NaN;
+    const probabilities = decision && decision.probabilities && typeof decision.probabilities === "object" ? decision.probabilities : {};
+    const riskChoice =
+      risk && (risk.choice === "low" || risk.choice === "medium" || risk.choice === "high") ? risk.choice : undefined;
+    const probeNoul = probe ? Number(probe.noul) : NaN;
+
+    // Any missing or out-of-shape answer is fail-closed, not guessed.
+    if (
+      choice === undefined ||
+      !Number.isFinite(confidence) ||
+      confidence < 0 ||
+      confidence > 1 ||
+      riskChoice === undefined ||
+      !Number.isFinite(probeNoul)
+    ) {
+      this._record(session, {
+        ...base,
+        durationMs: durationMs,
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: label,
+        rationale: "Jev returned no valid verdict shape (decision/riskLevel/concreteRisk incomplete)",
+      });
+      return "unavailable";
+    }
+
+    // Confidence gate: below the threshold the model is not sure enough to
+    // decide at all — never a grant, never a recorded rejection.
+    if (confidence < cfg.confidence) {
+      this._record(session, {
+        ...base,
+        durationMs: durationMs,
+        outcome: "unavailable",
+        riskLevel: riskChoice,
+        model: label,
+        rationale:
+          "Jev confidence " + confidence.toFixed(2) + " is below the gate " + cfg.confidence.toFixed(2) + " (decision draft: " + choice + ") — fail closed",
+      });
+      return "unavailable";
+    }
+
+    const pApprove = Number(probabilities.approve);
+    const pReject = Number(probabilities.reject);
+    const rationale =
+      "Jev 决策=" + choice +
+      "（置信度 " + confidence.toFixed(2) +
+      (Number.isFinite(pApprove) && Number.isFinite(pReject)
+        ? "，p approve/reject " + pApprove.toFixed(2) + "/" + pReject.toFixed(2)
+        : "") +
+      "）；风险=" + riskChoice +
+      "；具体风险概率=" + probeNoul.toFixed(2) +
+      "。Jev 为结构化决策模型，不生成文字，本理由由概率分布合成。";
+
+    base.durationMs = durationMs;
+    const approved = choice === "approve";
+    this._record(session, {
+      ...base,
+      outcome: approved ? "allowed-once" : "rejected",
+      riskLevel: riskChoice,
+      model: label,
+      rationale: trunc(rationale, 600),
+    });
+    if (approved && trustKey !== undefined) {
+      let set = this._trusted.get(session.id);
+      if (set === undefined) {
+        set = new Set();
+        this._trusted.set(session.id, set);
+      }
+      set.add(trustKey);
+    }
+    return approved ? "allowed-once" : "rejected";
+  }
+
   // ---- Remote API ------------------------------------------------------------
 
   /**
@@ -1100,6 +1465,7 @@ export class AgentApprovalService extends TypertRemoteService {
       ok: true,
       value: {
         model: { provider: this._model.provider, model: this._model.model },
+        jev: this._jevShape(),
         timeoutMs: this._timeoutMs,
         enabledSessions: this._sessionInfos(),
         rules: this._rulesSnapshot(),
@@ -1114,10 +1480,33 @@ export class AgentApprovalService extends TypertRemoteService {
   async setModel(request) {
     const provider = request && typeof request.provider === "string" ? request.provider : "";
     const model = request && typeof request.model === "string" ? request.model : "";
-    this._model =
-      provider !== "" && model !== "" ? { provider, model } : { provider: "", model: "" };
+    if (provider === JEV_PROVIDER) {
+      // The Jev backend ignores the harness route table; an unset model just
+      // means the latest alias.
+      this._model = { provider: JEV_PROVIDER, model: model !== "" ? model : JEV_DEFAULT_MODEL };
+    } else {
+      this._model =
+        provider !== "" && model !== "" ? { provider, model } : { provider: "", model: "" };
+    }
     this._persistConfig();
     return { ok: true, value: { model: { provider: this._model.provider, model: this._model.model } } };
+  }
+
+  /**
+   * Set the TypeSafe Jev backend settings (only provided fields change).
+   * `confidence` is the gate below which Jev's answer is not trusted and the
+   * outcome resolves fail-closed; clamped to [0.01, 0.99]. Persisted.
+   */
+  async setJevConfig(request) {
+    const r = request && typeof request === "object" ? request : {};
+    if (typeof r.apiKey === "string") this._jev.apiKey = r.apiKey.trim();
+    if (typeof r.endpoint === "string") this._jev.endpoint = r.endpoint.trim();
+    if (typeof r.model === "string") this._jev.model = r.model.trim();
+    if (typeof r.confidence === "number" && Number.isFinite(r.confidence)) {
+      this._jev.confidence = Math.min(0.99, Math.max(0.01, r.confidence));
+    }
+    this._persistConfig();
+    return { ok: true, value: { jev: this._jevShape() } };
   }
 
   /** Set the judge timeout (clamped to [MIN, MAX] milliseconds). Persisted. */
