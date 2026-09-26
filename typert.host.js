@@ -42,6 +42,7 @@ const recordSchema = z
     durationMs: z.number(),
     childSessionId: z.string(),
     rationale: z.string(),
+    mode: z.enum(["escalation", "review"]),
   })
   .readonly();
 
@@ -51,6 +52,9 @@ const modelRouteSchema = z
     model: z.string(),
   })
   .readonly();
+
+/** Judge invocation mode (v1.8.0): direct LLM stream call, or the spawn subagent. */
+const judgeModeSchema = z.enum(["llm", "subagent"]);
 
 const jevConfigSchema = z
   .object({
@@ -83,6 +87,9 @@ const ruleSchema = z
 const stateValueSchema = z
   .object({
     model: modelRouteSchema,
+    judgeMode: judgeModeSchema,
+    reviewAvailable: z.boolean(),
+    reviewDefault: z.boolean(),
     jev: jevConfigSchema,
     timeoutMs: z.number(),
     enabledSessions: z.array(enabledSessionSchema).readonly(),
@@ -93,6 +100,18 @@ const stateValueSchema = z
 const setModelValueSchema = z
   .object({
     model: modelRouteSchema,
+  })
+  .readonly();
+
+const setJudgeModeValueSchema = z
+  .object({
+    judgeMode: judgeModeSchema,
+  })
+  .readonly();
+
+const setReviewDefaultValueSchema = z
+  .object({
+    reviewDefault: z.boolean(),
   })
   .readonly();
 
@@ -179,6 +198,8 @@ function okResult(valueSchema) {
 
 const stateResultSchema = okResult(stateValueSchema);
 const setModelResultSchema = okResult(setModelValueSchema);
+const setJudgeModeResultSchema = okResult(setJudgeModeValueSchema);
+const setReviewDefaultResultSchema = okResult(setReviewDefaultValueSchema);
 const setJevResultSchema = okResult(setJevValueSchema);
 const setTimeoutResultSchema = okResult(setTimeoutValueSchema);
 const toggleResultSchema = okResult(toggleValueSchema);
@@ -192,6 +213,14 @@ const directoryResultSchema = okResult(directoryValueSchema);
 const _agentApproval_setModel_parameter_0$schema = z.object({
   provider: z.string(),
   model: z.string(),
+});
+
+const _agentApproval_setJudgeMode_parameter_0$schema = z.object({
+  mode: judgeModeSchema,
+});
+
+const _agentApproval_setReviewDefault_parameter_0$schema = z.object({
+  on: z.boolean(),
 });
 
 const _agentApproval_setJevConfig_parameter_0$schema = z.object({
@@ -269,6 +298,60 @@ export const TYPERT = {
         typeSymbol: "dsh-agent-approval#AgentApprovalSetModelResult",
         schema: setModelResultSchema,
         create: () => setModelResultSchema,
+      },
+      sourceLocation: { file: "index.js", line: 1, column: 1 },
+    },
+    {
+      id: "dsh-agent-approval#agentApproval/setJudgeMode",
+      service: "agentApproval",
+      namespace: "agentApproval",
+      method: "setJudgeMode",
+      invocation: { kind: "direct" },
+      parameters: [
+        {
+          name: "request",
+          wire: "request",
+          source: "json",
+          codec: {
+            mode: "strict",
+            typeSymbol: "dsh-agent-approval#AgentApprovalSetJudgeModeRequest",
+            schema: _agentApproval_setJudgeMode_parameter_0$schema,
+            create: () => _agentApproval_setJudgeMode_parameter_0$schema,
+          },
+        },
+      ],
+      result: {
+        mode: "strict",
+        typeSymbol: "dsh-agent-approval#AgentApprovalSetJudgeModeResult",
+        schema: setJudgeModeResultSchema,
+        create: () => setJudgeModeResultSchema,
+      },
+      sourceLocation: { file: "index.js", line: 1, column: 1 },
+    },
+    {
+      id: "dsh-agent-approval#agentApproval/setReviewDefault",
+      service: "agentApproval",
+      namespace: "agentApproval",
+      method: "setReviewDefault",
+      invocation: { kind: "direct" },
+      parameters: [
+        {
+          name: "request",
+          wire: "request",
+          source: "json",
+          codec: {
+            mode: "strict",
+            typeSymbol: "dsh-agent-approval#AgentApprovalSetReviewDefaultRequest",
+            schema: _agentApproval_setReviewDefault_parameter_0$schema,
+            create: () => _agentApproval_setReviewDefault_parameter_0$schema,
+          },
+        },
+      ],
+      result: {
+        mode: "strict",
+        typeSymbol: "dsh-agent-approval#AgentApprovalSetReviewDefaultResult",
+        schema: setReviewDefaultResultSchema,
+        create: () => setReviewDefaultResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -539,7 +622,7 @@ export const TYPERT = {
           {
             name: "AgentApprovalRecord",
             declaration:
-              "export interface AgentApprovalRecord {\n    readonly at: string;\n    readonly sessionId: string;\n    readonly toolName: string;\n    readonly reason: string;\n    readonly args: string;\n    readonly outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable';\n    readonly riskLevel: string;\n    readonly model: string;\n    readonly durationMs: number;\n    readonly childSessionId: string;\n    readonly rationale: string;\n}",
+              "export interface AgentApprovalRecord {\n    readonly at: string;\n    readonly sessionId: string;\n    readonly toolName: string;\n    readonly reason: string;\n    readonly args: string;\n    readonly outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable';\n    readonly riskLevel: string;\n    readonly model: string;\n    readonly durationMs: number;\n    readonly childSessionId: string;\n    readonly rationale: string;\n    readonly mode: 'escalation' | 'review';\n}",
           },
           {
             name: "AgentApprovalModelRoute",
@@ -579,7 +662,27 @@ export const TYPERT = {
           {
             name: "AgentApprovalStateValue",
             declaration:
-              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly jev: AgentApprovalJevConfig;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n}",
+              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly judgeMode: 'llm' | 'subagent';\n    readonly reviewAvailable: boolean;\n    readonly reviewDefault: boolean;\n    readonly jev: AgentApprovalJevConfig;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n}",
+          },
+          {
+            name: "AgentApprovalSetReviewDefaultRequest",
+            declaration:
+              "export interface AgentApprovalSetReviewDefaultRequest {\n    readonly on: boolean;\n}",
+          },
+          {
+            name: "AgentApprovalSetReviewDefaultResult",
+            declaration:
+              "export type AgentApprovalSetReviewDefaultResult = { ok: true; value: { readonly reviewDefault: boolean } } | { ok: false; error: { code: string; message?: string } };",
+          },
+          {
+            name: "AgentApprovalSetJudgeModeRequest",
+            declaration:
+              "export interface AgentApprovalSetJudgeModeRequest {\n    readonly mode: 'llm' | 'subagent';\n}",
+          },
+          {
+            name: "AgentApprovalSetJudgeModeResult",
+            declaration:
+              "export type AgentApprovalSetJudgeModeResult = { ok: true; value: { readonly judgeMode: 'llm' | 'subagent' } } | { ok: false; error: { code: string; message?: string } };",
           },
           {
             name: "AgentApprovalSessionRecordsRequest",

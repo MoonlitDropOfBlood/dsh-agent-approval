@@ -4,14 +4,14 @@
 
 ## 项目是什么
 
-一个 **DeepSeek Harness（DSH）双面（Host + Client）插件**：新增一种 **Agent 审批** 权限模式。
+一个 **DeepSeek Harness（DSH）双面（Host + Client）插件**：新增一种 **自动审批** 权限模式。
 
 - 以 **workspace-write 为基线沙箱**；工具请求提权（更宽沙箱，如 `sandbox_permissions`）时，不再弹人工审批，而是交由**一个独立的审批 Agent（subagent）裁决**。
 - 审批 Agent 在**独立会话**里运行：零父级上下文、全局工具全部空白（`toolFilter: {allow:[]}`）、审批策略被委派机制钉死为 `never`（不可能递归再审批），必须通过 `structured_output` 结构化工具给出裁决：`{ decision: approve|reject, riskLevel, rationale }`。
 - **风险即拒绝**：破坏性 / 不可逆 / 越界 / 理由与实际参数不符 → `reject`；只有"安全、可逆、与任务相符、理由诚实"才 `approve`。
 - **Fail-closed**：审批 Agent 启动失败、超时、结果不合法、请求被取消 → 一律按拒绝处理（`unavailable`/`cancelled`），绝不静默放行。
-- **设置面板**新增 **Agent 审批** 页（`settings.section`）：配置审批模型（provider/model、Harness 默认模型，或 **TypeSafe Jev 直连后端**，见第 4b 节）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化）。**审计不在这里**：会话窗口顶部新增**「审批」标签页**（`conversation.view` ring，紧邻「轨迹」；chat=0 / trajectory=10 / 审批=11），按会话折叠展示审批记录（**倒序、最新在上**；结论/风险/模型/耗时/理由，悬停看完整理由与工具参数，行内可一键「加白」）——记录存在**会话目录内的独立旁路文件**（见第 6 节）。
-- 输入框 `/permission` 菜单的「Agent 审批」预设 + `/agent-approval on|off` 命令为当前会话开关（**刻意没有 composer chip**——开关本就属于权限菜单，菜单旁边再放一个属冗余，已移除）；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
+- **设置面板**新增 **自动审批** 页（`settings.section`）：配置审批模型（provider/model、Harness 默认模型，或 **TypeSafe Jev 直连后端**，见第 4b 节）与审批超时（两者**持久保存**，重启不丢）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化）。**审计不在这里**：会话窗口顶部新增**「审批」标签页**（`conversation.view` ring，紧邻「轨迹」；chat=0 / trajectory=10 / 审批=11），按会话折叠展示审批记录（**倒序、最新在上**；结论/风险/模型/耗时/理由，悬停看完整理由与工具参数，行内可一键「加白」）——记录存在**会话目录内的独立旁路文件**（见第 6 节）。
+- 输入框 `/permission` 菜单的「自动审批」预设 + `/agent-approval on|off` 命令为当前会话开关（**刻意没有 composer chip**——开关本就属于权限菜单，菜单旁边再放一个属冗余，已移除）；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
 
 ## 目录结构
 
@@ -76,7 +76,7 @@ this.ctx.on("approval/request", (req, next) => this._onApprovalRequest(req, next
 - **监听器为什么收得到所有会话的派发**：审批派发带 `scopeTarget(this, req.agent)` 过滤器，untagged 监听器（本插件挂在 profile 根组合，无 scope 标签）一律放行。**因此本插件必须挂在 HOST 平面**（`cordis.patch.yml` 的 `- insert:` 行），不要放进任何 isolate realm。
 - **为什么开启时要切到 `ask`**：policy 为 `never` 时 `decide()` 在瀑布之前就直接返回 `rejected`，监听器根本不会执行。`_setEnabled(on)` 在开启时记住会话的**有效**旋钮值（override ?? 组合默认——一个活在 `never` 组合默认下的会话，关闭时必须回到 `never` 而不是"无覆盖"状态），然后：沙箱用 `session.append("sandbox/mode", { mode: "workspace-write" })`（与官方 `setSandboxMode` 完全同一事件形态）；审批策略用 `approval.setPolicy(agent, "ask")`（规范写路径：追加 `approval/policy` 事件 + 给模型注入切换通知）。关闭时经同一对规范 setter 恢复记住的值（值未变化时 setter 自动 no-op）。
 
-### 4. 审批 Agent：一次性 `spawn` 子代理 + 结构化裁决
+### 4. 审批裁决：一次性 `spawn` 子代理 + 结构化裁决（v1.8.0 起为可选的 `judgeMode: "subagent"` 路径；**默认裁决器是 LLM 直连，见第 11a 节**——本节的输入/输出契约两路完全同构）
 
 ```js
 const run = await this.ctx.subagents.start("spawn", {
@@ -120,7 +120,7 @@ const run = await this.ctx.subagents.start("spawn", {
 
 1. **deny 规则命中 → 直接 `rejected`**（所有 deny 先于任何 allow 判定，后加的 deny 永远压过先加的 allow）；**allow 规则命中 → 直接 `allowed-once`**。规则形状 `{ id, effect, tool, match, note, createdAt }`，持久化在 config.json 的 `rules` 字段：`tool` 为精确工具名或 `"*"`；`match` 为空 = 该工具全部调用，否则是**参数原始 JSON 的子串**或 `/pattern/flags` 正则（`_ruleRegex` 编译失败 = 永不命中，`addRule` 时即校验拒绝）。规则命中也写审计（model 列记 `rule`）。
 2. **会话内信任缓存**：模型 approve 后把 `工具名 + "\n" + 参数原始 JSON` 指纹存入该会话的 Set（`_trusted` Map）；同一会话内**参数逐字节相同**的再次提权直接 `allowed-once`（审计 model 列记 `trust`）。**不跨会话、不泛化到相似参数**，随 `_enabled` 条目一起在三处删除点清空（preset 切走 / session disposed / `_disable`）。跨会话复用走规则表：会话窗口「审批」tab 审计行的「加白」按钮一键把已批准操作存成 allow 规则（记录里的 args 是完整参数 JSON 的**前缀**，截断标记 `…[truncated]` 需先剥掉）。
-3. 都不命中才 spawn 审批模型。
+3. 都不命中才进裁决器（v1.8.0 起默认 **LLM 直连**，见第 11a 节；Jev / 隔离子代理见第 4b / 4 节）。**规则/信任短路对自动审查模式（第 11b 节）同样生效**——这是逐调用审查的成本控制关键。
 
 - 设置页「放行 / 拒绝规则」卡片管理规则（Remote 方法 `addRule`/`removeRule`，整表返回；`getState` 带 `rules` 字段，client 对旧 Host 缺该字段时降级为 `[]`）。
 - wire 变更照旧三处同步：index.js 构造、typert.host.js（`ruleSchema` + `rulesValueSchema` + 两个 invocation + `AgentApprovalRule`/`AgentApprovalRulesResult` 类型声明）、client.js（描述符 + UI）。
@@ -151,11 +151,11 @@ const run = await this.ctx.subagents.start("spawn", {
 
 ### 8. 权限菜单集成（`permission` 行覆盖 + `permission/preset` 事件联动）
 
-权限菜单（输入框 `/permission` 控件）的选项来自 **`dsh-permission-presets` 的 Config 预设表**；Web 端切换 = 执行 `/permission <preset>` 命令 → 追加 `permission/preset` 事件 + 旋钮事件。要让「Agent 审批」出现在菜单里：
+权限菜单（输入框 `/permission` 控件）的选项来自 **`dsh-permission-presets` 的 Config 预设表**；Web 端切换 = 执行 `/permission <preset>` 命令 → 追加 `permission/preset` 事件 + 旋钮事件。要让「自动审批」出现在菜单里：
 
 1. **包的 `cordis.patch.yml`（bundle patch）里写 `- id: permission` 覆盖行**，把 `agent-approval`（bundle = workspace-write + ask）加进预设表。**patch 语义是整行替换 config（不合并）**，所以必须重述全表（read-only / workspace-write / **agent-approval** / danger-full-access）——**声明顺序即菜单顺序**，agent-approval 排在 Full access 上面；DSH 升级若改了基础表要手动同步。
-2. **菜单图标（v1.3.2+ 由插件内置，无需 patch）**：菜单行 + 触发按钮的图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`（源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**，外部预设整行不渲染图标元素。client.js 的 `registerPermissionGlyphIcon(SETTINGS_LABEL)` 用 MutationObserver 给「Agent 审批」的 `/permission` 菜单行（`[role="menu"] button[role="menuitem"]` 中文本等于 label 者）和输入框旁触发按钮（非 menuitem、不在 `[role="dialog"]` 内、首 span 文本等于 label 且含 svg 者）分别打 `data-dsh-agent-approval-perm-item` / `data-dsh-agent-approval-perm-trigger` 标记，CSS 再用 `currentColor` mask 画盾牌 + AI 星形（16×16，与出厂图标同风格）。**菜单行有 glyph-set 守卫**：只在"兄弟行已带官方图标"的菜单里打标——判定为菜单内存在 `span[class*="itemIcon"]`（v1.7.0 从 `_itemIcon_` 放宽：CSS-modules 两代编译名不同（`_itemIcon_<hash>_` vs `<hash>_itemIcon`）；选中行的对勾是 `_check_`，不会误判）。0.1.7-rc.1 起权限控件从 dsh-client-ui-conversation 拆到独立包 `dsh-client-ui-permission-presets`（composer 里挂 `conversation.input.permission` slot，`PermissionSelect` 已从 conversation 包删除），但菜单仍是同一 Menu 原语（`button[role=menuitem]` + itemIcon span），标记逻辑不变。设置页 → 通用 → 「权限」行的默认预设下拉（`Menu portal:true` 传送到 `<body>`，所有预设都无图标）因此**不再**被误标——否则「Agent 审批」会成为那里唯一带图标的行。历史方案 `scripts/patch-glyph.mjs`（直接补丁官方编译产物）已被取代——插件内置版随包分发、DSH 升级不丢；脚本保留作参考，新安装**不再需要**跑它。
-3. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；命令关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「Agent 审批」。
+2. **菜单图标（v1.3.2+ 由插件内置，无需 patch）**：菜单行 + 触发按钮的图标来自编译进官方 `dsh-client-ui-conversation` 的硬编码映射 `permissionGlyphs`（源码注释明说 "host-configured names outside the design set get none"），**没有公开注册口**，外部预设整行不渲染图标元素。client.js 的 `registerPermissionGlyphIcon(SETTINGS_LABEL)` 用 MutationObserver 给「自动审批」的 `/permission` 菜单行（`[role="menu"] button[role="menuitem"]` 中文本等于 label 者）和输入框旁触发按钮（非 menuitem、不在 `[role="dialog"]` 内、首 span 文本等于 label 且含 svg 者）分别打 `data-dsh-agent-approval-perm-item` / `data-dsh-agent-approval-perm-trigger` 标记，CSS 再用 `currentColor` mask 画盾牌 + AI 星形（16×16，与出厂图标同风格）。**菜单行有 glyph-set 守卫**：只在"兄弟行已带官方图标"的菜单里打标——判定为菜单内存在 `span[class*="itemIcon"]`（v1.7.0 从 `_itemIcon_` 放宽：CSS-modules 两代编译名不同（`_itemIcon_<hash>_` vs `<hash>_itemIcon`）；选中行的对勾是 `_check_`，不会误判）。0.1.7-rc.1 起权限控件从 dsh-client-ui-conversation 拆到独立包 `dsh-client-ui-permission-presets`（composer 里挂 `conversation.input.permission` slot，`PermissionSelect` 已从 conversation 包删除），但菜单仍是同一 Menu 原语（`button[role=menuitem]` + itemIcon span），标记逻辑不变。设置页 → 通用 → 「权限」行的默认预设下拉（`Menu portal:true` 传送到 `<body>`，所有预设都无图标）因此**不再**被误标——否则「自动审批」会成为那里唯一带图标的行。历史方案 `scripts/patch-glyph.mjs`（直接补丁官方编译产物）已被取代——插件内置版随包分发、DSH 升级不丢；脚本保留作参考，新安装**不再需要**跑它。
+3. **同 bundle 歧义规则**：`agent-approval` 与 `workspace-write` 的旋钮值完全相同；`derive()` 里"仍匹配的最后选中预设"赢得平局，所以**菜单显示什么完全由最后的 `permission/preset` 事件决定**。因此：命令开启时也追加 `permission/preset: agent-approval`（菜单同步显示）；命令关闭时按恢复的旋钮值回写正确的预设事件（跳过我们自己的条目），否则菜单会卡在「自动审批」。
 4. **事件联动**（`session/event` 监听 `permission/preset`）：
    - 选中 `agent-approval` → `_enableCore`（此刻旋钮事件还没落，捕获的 prev 恰是切换前的值；我们写的旋钮值与预设服务随后要写的相同，它检查后跳过，无重复事件）。
    - 选中其他预设 → 只删 bookkeeping，**不恢复旋钮**（预设服务马上写自己的旋钮，恢复会打架）。
@@ -172,7 +172,7 @@ const run = await this.ctx.subagents.start("spawn", {
 2. 启动时 DSH 应用包内 `cordis.patch.yml`，做两件事：**`- insert:`** 新增插件挂载行（**不要**对不存在的 id 用普通 `- id:`，会报 "entry not found"）；**`- id: permission`** 覆盖预设表行（该 id 已存在，覆盖合法）：
 
 ```yaml
-# cordis.patch.yml（随包分发）
+# cordis.patch.yml（随包分发，节选——以包内实际文件为准）
 - insert:
   - id: agent-approval
     name: '@duke-dsh-plugins/dsh-agent-approval'
@@ -186,8 +186,13 @@ const run = await this.ctx.subagents.start("spawn", {
       agent-approval:
         sandbox: workspace-write
         approval: ask
-        name: Agent 审批
-        description: workspace-write base; an independent approval agent judges every escalation, risky ones are rejected.
+        name: 自动审批
+        description: workspace-write base; every sandbox escalation is judged automatically, risky ones are rejected.
+      agent-review:
+        sandbox: danger-full-access
+        approval: ask
+        name: 自动审查
+        description: Full access base; every tool call is reviewed by the Jev judge before execution, risky calls are rejected with no human fallback.
       danger-full-access: { sandbox: danger-full-access, approval: never }
 ```
 
@@ -216,6 +221,32 @@ const run = await this.ctx.subagents.start("spawn", {
 - **DSH 版本声明走 peerDependencies，不走 dsh.plugin.json**：宿主版本声明的官方槽位是 `package.json#peerDependencies` 里名为 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的条目——0.1.7+ 的 app-boot 启动预检（`plugin-compatibility.js` 的 `evaluatePluginCompatibility`；**0.1.5 及更早没有这段，范围只在 0.1.7+ 运行时被评估**）对每个这样的 peer 跑 `semver.satisfies(runtime, range, { includePrerelease: true })`，不匹配就告警并可用 `dsh plugin allow-version` 做精确版本豁免（`peerDependenciesMeta.optional` **不免检**）。本插件声明 `"@deepseek-ai/dsh": "^0.1.5-rc.3"`（= 实测支持线 0.1.5-rc.3 ~ 0.1.7-rc.1，`<0.2.0` 上限强制 0.2.0 前重验），并配 `peerDependenciesMeta.@deepseek-ai/dsh.optional = true`——**optional 是给安装器看的**（免得 npm/pnpm 把整套 `@deepseek-ai/dsh` CLI 运行时当缺失 peer 自动装进来），**预检照读不误**。**dsh-market（dshmarket.com）从 npm manifest 读三种宿主声明并合取判定**（`discovery-compatibility.ts` #577：顶层 `engines.dsh`、`dsh.engines.dsh`、以及 `@deepseek-ai/dsh*` peers；判定同样 `includePrerelease`），所以本插件另在 `package.json#dsh.engines.dsh` 写了同一范围 `^0.1.5-rc.3`——引擎形状给市场徽标/`compatibleWithHost` 过滤用，peer 形状给 0.1.7 启动闸门用，**两处范围必须同步改**（市场侧装机预检对 optional peer 不报风险，但 discovery 不读 optional 标记，peer 声明照样计入）。市场对 0.2+ 宿主的展示与闸门可能短暂不一致（peer 的隐式上限在市场侧被软化为警告），以启动闸门为准。注意 `dsh.plugin.json`（社区 plugin-registry 渠道的清单，`dsh registry install` 用）的 `engines.dsh` **不是 DSH 契约**——没有任何 DSH 版本读它；本插件走 npm + `dsh plugin add` 官方渠道，不需要该文件。版本声明要发新 npm 版本（v1.7.1+）后市场才读得到；市场页 README/版本是每日 CI 的快照，会滞后。
 - **验证工具**：`scripts/check-typert-manifest.mjs`（已挂进 `npm run check`）——镜像两代 loader/registry 的 codec 校验器跑 manifest、从真实 client.js 提取 CLIENT_REMOTE 做 id/参数/typeSymbol 对齐检查；设 `DSH_TYPERT_REGISTRY`（可加 `DSH_TYPERT_REGISTRY_2`）指向真实安装的 `@deepseek-ai/dsh-typert-registry/lib/index.js` 时，还会用**真注册表**跑一遍注册。本次修复已用 0.1.5-rc.3 与 0.1.7-rc.1 两代真注册表验证通过（Host manifest + Client descriptors 双双接受）。
 
+### 11. v1.8.0：LLM 直连裁决（默认）+ 自动审查模式（agent-review）
+
+**显示名改名（用户拍板）**：用户可见文案「Agent 审批」→「**自动审批**」、「Agent 审查」→「**自动审查**」。代码标识一律不动：包名、`exports`、`/agent-approval`/`/agent-review` 命令、preset key `agent-approval`/`agent-review`、wire 描述符 id。**约定：设置页 label（`SETTINGS_LABEL`）与权限预设 `name` 必须保持同名**——`registerSettingsNavIcon`/`registerPermissionGlyphIcon`/`registerReviewMenuItem` 全是按显示文本匹配的 MutationObserver，改名时 `client.js` 的 `SETTINGS_LABEL`/`REVIEW_LABEL` 与 `cordis.patch.yml` 的 `name:` 必须同步，否则图标/gate 静默失配（历史上靠两 label 碰巧同名才工作）。
+
+**改名后菜单仍是旧名 + 图标消失？查 profile 残留覆盖（2026-09-26 实踩）**：patch 应用顺序是 **bundle patch → `~/.dsh/profiles/web/cordis.patch.yml` → `--patch` overlays**，后者对 `permission` 行是**整行替换**。若 profile patch 里有历史手工粘贴的预设表（AGENTS.md 第 9 节本就警告过"不要手工插行"），它会在本包 bundle patch **之后**覆盖 `name`——宿主持续显示旧名，而 client 图标按新文本匹配不上 → 图标消失。修法：把 profile patch 里的 `permission` 行同步成新表（**注意保留其中的 `defaultPreset` 等用户配置**，不能整块删除——`presets` 整行替换语义下删行会丢表）。诊断口诀：宿主名字没变而 client 新了 = 查 `grep "Agent 审批" ~/.dsh/profiles/web/*.yml`。
+
+#### 11a. LLM 直连裁决（`judgeMode: "llm"`，v1.8.0 起默认）
+
+- **动机**：spawn 子代理有轻微上下文污染（会话列表多一条审批员子会话、请求会话日志写 `subagent/descriptor`）。默认裁决器改为**一次 `ctx.llm.stream()` 直连调用**（`_judgeWithLlmStream`），零子会话（审计 `childSessionId` 恒空）。`judgeMode: "subagent"` 保留旧行为（设置页「裁决方式」下拉，`setJudgeMode` 持久化到 config.json）。
+- **输入/输出与 subagent 路径完全同构，仅调用方式不同**：同一 `APPROVER_PERSONA`（→ `system`）+ 同一 `_judgePrompt(...)`（→ user 消息）+ 同一 `VERDICT_SCHEMA` 契约（`_verdictFromJsonText` 做等价校验：三字段、enum、`additionalProperties:false`）。唯一文本差异是**输出指令尾巴参数化**（`OUTPUT_VIA_STRUCTURED_TOOL`/`PROMPT_TAIL_STRUCTURED` 对 spawn；`OUTPUT_VIA_JSON`/`PROMPT_TAIL_JSON` 对 stream）——persona 与 judgePrompt 其余部分逐字共享，**改审批口径两路自动同步**。
+- **流聚合**（`_readLlmVerdict`，自建零依赖）：dsh-llm `StreamChunk` 协议（`block-start`/`text-delta`/`reasoning-delta`/`tool-call-delta`/`block-end`/`usage`/`finish`）。`block-end` 是权威组装块、**替换**已累计的同 index 增量（防双计）；要求「零或多个 reasoning 块 + 恰一个 text 块 + terminal finish `reason.kind === "stop"`」；`aborted` finish 抛 AbortError（映射 `cancelled`），其他一切异常形态 → `unavailable`（fail-closed）。text 剥 code fence / 提取 `{...}` 再解析。
+- **路由**：复用 `_judgeRoute()`；解析到 `inherit(requester)` 时用 `session.requestHeader().config` 的会话自身路由（官方 auto-review 同源读法）；仍无 → `unavailable`。**`llm` 服务缺席不写兜底**（用户裁定：它缺席连主 agent 都跑不起来）——直接 fail-closed 记录。审计 model 列 `llm(<provider>/<model>)`。
+- `_jevVerdict` 的解析已抽成 **`_jevParse`**（malformed / low-confidence / verdict 三态），与审查模式的 `_reviewWithJev` 共用同一校验与置信度门控——**改 Jev 校验逻辑只改这一处**。
+
+#### 11b. 自动审查模式（`agent-review` 预设，逐调用审查，实验）
+
+- **形态**（对齐官方 `@deepseek-ai/dsh-experimental-auto-review` 的 `auto` 预设，但裁决器为 Jev 且 **deny 不转人工**）：`tools/pre-execute` 瀑布 prepend（`_onPreExecute`）+ `danger-full-access` 基线 + `ask` 档位。**覆盖 native + 每个 PTC inner 调用**（`exec.parent`），**排除外层 `run_code` transport**（`RUN_CODE_TOOL`，对齐官方）。key `agent-review` 避开保留字 `auto`/`custom`。
+- **裁决链**：规则表 → 会话内信任缓存 → Jev（`_reviewWithJev`；`JEV_REVIEW_QUESTIONS` = `JEV_QUESTIONS` 只换 decision 措辞）。state 比 `_jevStateOf` 多 `toolDescription`/`toolParameters`（官方 reviewer 也拿 schema；`exec.schema` 或 request header tools 查找，best-effort）。
+- **deny 一律 fail-closed（用户拍板，与官方 auto 的 ask 兜底刻意不同）**：reject、低置信、超时、网络故障、畸形返回全部 → `{kind:"deny", info:{name:"AgentReviewDeniedError", code:"AGENT_REVIEW_DENIED", reason:<Jev 风险理由>}}`，body 不执行、**不转人工**；取消 → `{kind:"cancel"}`。低置信审计记 `unavailable`（对称门控照旧）。误杀治理靠短路降噪，「拒绝后转人工」开关列 future。**`ask` 档位只是预设必填旋钮值，不代表拒绝会问人。**
+- **开启门槛（Jev gate，三层）**：判据 `_jevGateOk()` = Provider 为 `typesafe` **且** key 可解析（config 或 env）。① client 按 `getState().reviewAvailable` 设 `body[data-dsh-agent-approval-review-gate]`，gate 关时 CSS 隐藏「自动审查」菜单行（`registerReviewMenuItem` + `REVIEW_ITEM_MARKER`）；② 命令/`_setReviewEnabled` 开启前校验；③ **联动兜底**（`_reviewGateFallback`）：preset 事件或重启恢复折出 `agent-review` 而 gate 关 → 记审计（model 列 `gate`）+ `permissionPresets.set(session, PRESET_NAME)` 弹回自动审批预设，**绝不让会话裸奔 Full access**。
+- **审计**：entry 新增 `mode: "escalation" | "review"`（`_recordShape` 统一补齐，旧旁路行缺省折 `escalation`；typert strict schema 三处同步；client 工具列显示「逐调用」徽标）。
+- **命令/生命周期**：`/agent-review on|off`（`_setReviewEnabled` → `_enableCore(session, agent, "review")`，钉 `danger-full-access` + `ask`）；关闭/切走走 `_disable`（恢复 prev 旋钮，返回文案按 entry.mode 区分）；`agent/created` 折出 `agent-review` 重启恢复（**再过一遍 gate**，key 被删则弹回）；`_enabled` 条目带 `mode`，`_onPreExecute` 只认 `mode === "review"` 的会话，`_onApprovalRequest` 只认 escalation 会话（两模式互不串台）。
+- **全局默认开关（v1.8.0，`setReviewDefault`，设置页「逐调用审查」下拉）**：开启后**新会话**（`_isFreshSession`：日志里还没有真实用户消息）自动进入自动审查（再过 gate；不过则按普通默认走）。**恢复的会话绝不翻转**——它们折叠出的 preset 是用户过去的选择。现存会话的切换仍走菜单/命令。持久化在 config.json `reviewDefault`。
+- **设置页条件布局**：Provider = TypeSafe Jev → 显示「自动审查」卡片（含逐调用审查开关），隐藏「裁决方式」（Jev 是 HTTP 直连，LLM 直连/子代理之分无意义）；Provider ≠ Jev → 显示「裁决方式」（LLM 直连/隔离子代理），隐藏「自动审查」卡片。
+- **勿与官方 experimental-auto-review 同开会话**：`tools/pre-execute` 会叠两层互不知情的裁决。
+
 ## 开发 / 验证
 
 ```bash
@@ -225,15 +256,18 @@ npm run patch:glyph      # 可选：权限菜单图标（幂等）
 ```
 
 改插件后**必须重启 DSH 进程**才生效。验证：
-1. 输入框 `/permission` 菜单出现第四项 **Agent 审批**；设置 → 侧栏导航出现 **Agent 审批** 页（模型/超时可保存）。
-2. 用 `/agent-approval on` 或菜单选 **Agent 审批** 为会话开启（两条路径等价）；输入框左侧**不再有**「🛡 审批」chip。
+1. 输入框 `/permission` 菜单出现第四项 **自动审批**；设置 → 侧栏导航出现 **自动审批** 页（模型/超时可保存）。
+2. 用 `/agent-approval on` 或菜单选 **自动审批** 为会话开启（两条路径等价）；输入框左侧**不再有**「🛡 审批」chip。
 3. 开启后让工作区内命令触发一次提权重试（`sandbox_permissions`）：**不弹人工审批**，片刻后工具结果即为批准/拒绝；会话窗口顶部出现**「审批」标签页**（轨迹旁），点开能看到这条记录（含风险等级与理由；10s 内自动刷新，也可手动点「刷新」）。
 4. `/agent-approval off` 关闭：沙箱模式与审批策略恢复开启前的值，菜单同步切回对应预设；再次提权回到人工弹窗（ask）或原策略行为。
-5. 菜单切到 danger-full-access：模式自动关闭（`permission/preset` 事件联动，立即生效）；菜单切回 Agent 审批：模式自动开启，无需手动执行命令。
+5. 菜单切到 danger-full-access：模式自动关闭（`permission/preset` 事件联动，立即生效）；菜单切回 自动审批：模式自动开启，无需手动执行命令。
 6. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
 7. 设置页加一条 allow 规则（如工具 `pwsh` + match 子串）→ 命中的提权**不再起审批子代理**，审计 model 列显示 `rule`；模型批准的提权在同一会话内以完全相同参数再次发起 → 直接放行，model 列显示 `trust`；「审批」tab 审计行点「加白」→ 规则表新增对应 allow 规则。
 8. 审批模型 Provider 切到 **TypeSafe Jev**（第 4b 节）：未配 Key 时提权应立即 fail-closed 拒绝并记录 `unavailable`（理由注明缺 Key）；配好 Key（或设 `TYPESAFE_API_KEY`）后模型判定应亚秒级完成、审计 model 列显示实际版本（如 `jev(jev-1.13.0)`）、理由列为概率合成文本；把置信度阈值调到 0.99 → 大概率低置信 `unavailable`（既不批准也不记拒绝）；Endpoint 指向不存在的主机 → 网络错误 `unavailable`；规则表命中的提权在 Jev 模式下**依旧短路**（不发 HTTP 请求）。
 9. （DSH 0.1.7-rc.1 宿主，见第 10 节）重启后 `/permission` 菜单与设置页正常打开即证明 codec 双格式注册成功（旧版 ≤1.6.0 在 0.1.7 上这两处直接死）；权限菜单行的盾牌图标若缺失只影响观感（glyph-set 守卫跨代 CSS 类名），功能不受影响。
+10. （v1.8.0 功能 A，见第 11a 节）**默认即 LLM 直连**：开启自动审批后触发一次提权 → 亚秒级裁决、审计 model 列 `llm(<provider>/<model>)`、`childSessionId` 空，且**会话列表不出现审批员子会话**（零上下文污染核验）；「裁决方式」切「隔离子代理」→ 恢复旧行为（子会话出现、childSessionId 有值）；模型路由指向不存在的模型 → `unavailable`；超时调 30s + 大上下文 → `unavailable`；规则/信任短路照常（不发 LLM 请求）。
+11. （v1.8.0 功能 B，见第 11b 节）设置页启用 Jev 后，`/permission` 菜单出现 **自动审查**；未配 Jev 时该菜单行不可见、`/agent-review on` 报错；选中后触发一次普通工具调用 → 不打断、执行前经 Jev 一次（「审批」tab 出现 mode=逐调用 记录）；高危调用（如删工作区外文件）→ **直接拒绝、body 不执行**（工具结果带 `AGENT_REVIEW_DENIED` detail），**不弹人工**；低置信/超时/路由故障 → 同样直接拒绝并记 `unavailable`；同参数再调 → trust 短路；关掉 Jev 配置后重启 → 会话回退 自动审批 预设（不裸奔 Full access）；切回 workspace-write 预设 → 旋钮恢复、不再逐调用审查。
+12. （v1.8.0 改名）`/permission` 菜单显示 **自动审批**（不再是 Agent 审批），输入框权限触发按钮同步显示 **自动审批**，设置页侧栏出现 **自动审批** 页；菜单行盾牌图标与设置页 shield 图标照常显示（文本匹配 observer 已同步，无静默失配）；`/agent-approval on|off` 命令仍可用（命令名不动）。
 
 ## 发布
 

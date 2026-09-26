@@ -1,14 +1,15 @@
 # dsh bundle patch: inserts this plugin into a profile's layer stack and
-# registers the Agent 审批 preset in the permission menu.
+# registers the 自动审批 / 自动审查 presets in the permission menu.
 - insert:
   - id: agent-approval
     name: '@duke-dsh-plugins/dsh-agent-approval'
 
-# --- dsh-agent-approval: register the Agent 审批 preset in the permission menu ---
+# --- dsh-agent-approval: register the 自动审批 / 自动审查 presets in the permission menu ---
 # Restates the full presets table because a patch REPLACES the `permission`
 # row's whole config; re-sync with dsh-base when upgrading DSH. Declaration
-# order IS menu order: agent-approval sits between workspace-write and
-# danger-full-access (above Full access).
+# order IS menu order: 自动审批 and 自动审查 sit between workspace-write and
+# danger-full-access (above Full access). The `agent-review` key avoids the
+# reserved `auto`/`custom` preset names (0.1.7+ throws on those).
 - id: permission
   name: '@deepseek-ai/dsh-permission-presets'
   config:
@@ -22,8 +23,13 @@
       agent-approval:
         sandbox: workspace-write
         approval: ask
-        name: Agent 审批
-        description: workspace-write base; an independent approval agent judges every escalation, risky ones are rejected.
+        name: 自动审批
+        description: workspace-write base; every sandbox escalation is judged automatically, risky ones are rejected.
+      agent-review:
+        sandbox: danger-full-access
+        approval: ask
+        name: 自动审查
+        description: Full access base; every tool call is reviewed by the Jev judge before execution, risky calls are rejected with no human fallback.
       danger-full-access:
         sandbox: danger-full-access
         approval: never

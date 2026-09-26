@@ -164,7 +164,40 @@ const JEV_QUESTIONS = {
 };
 
 /**
- * The structured verdict the judge subagent MUST produce. Constrained to the
+ * v1.8.0: the per-call review mode (`agent-review` preset). The SAME policy
+ * criteria as `JEV_QUESTIONS` — only the decision instruction wording adapts
+ * from "escalation request" to the pending tool call.
+ */
+const JEV_REVIEW_QUESTIONS = {
+  ...JEV_QUESTIONS,
+  decision: {
+    ...JEV_QUESTIONS.decision,
+    instructions: "Should this pending tool call be allowed to execute?",
+  },
+};
+
+/**
+ * The per-call review preset key (registered by the package's
+ * `cordis.patch.yml` `permission` row override; key avoids the reserved
+ * `auto`/`custom` names). Its bundle is Full access base + `ask` policy —
+ * `ask` is the required preset knob value, NOT a human fallback: every
+ * review denial is FINAL (fail-closed, no human review — user ruling
+ * 2026-10).
+ */
+const REVIEW_PRESET_NAME = "agent-review";
+/** The review preset's sandbox base (the mode pins the session here). */
+const REVIEW_BASE_MODE = "danger-full-access";
+/**
+ * The outer PTC transport tool name — deliberately EXCLUDED from per-call
+ * review (aligned with the official auto-review scope); every native call
+ * and every started PTC inner call IS reviewed.
+ */
+const RUN_CODE_TOOL = "run_code";
+/** Structured error identity shown on a final review denial tool card. */
+const REVIEW_DENIED_NAME = "AgentReviewDeniedError";
+const REVIEW_DENIED_CODE = "AGENT_REVIEW_DENIED";
+
+/** Constrained to the
  * JSON-Schema subset `assertObjectJsonSchema` enforces for subagent outputs
  * (type/properties/required/additionalProperties/enum only).
  */
@@ -190,14 +223,48 @@ const VERDICT_SCHEMA = {
   additionalProperties: false,
 };
 
-/** Shadowing persona for the judge child (spawn provider capability). */
-const APPROVER_PERSONA = [
-  "You are an independent security approval agent inside a coding harness.",
-  "Your only job is to judge ONE request for wider sandbox access and report the verdict through the structured_output tool.",
-  "You reject what is concretely dangerous — destructive or irreversible operations, ones that reach outside their stated purpose, or requests whose stated justification does not match the actual arguments. Mere uncertainty, an unfamiliar command, or a terse justification is never enough: every rejection must name the concrete risk the operation creates.",
-  "Your own judging session is deliberately sandboxed: approvals are disabled for YOU and your permission scope is fixed. That describes only your own environment — never cite your own constraints (or anything your runtime context says about YOUR permissions) as a property of the requesting session or as grounds for rejection.",
-  "You never ask questions, never attempt the operation yourself, and never finish with a plain-text answer.",
-].join(" ");
+/**
+ * v1.8.0 judge invocation modes. `"llm"` (the default) judges through ONE
+ * direct `ctx.llm.stream()` call — no subagent session is created, so the
+ * requesting session keeps zero judge-side context pollution (no child in
+ * the session list, no `subagent/descriptor` events). `"subagent"` spawns
+ * the isolated judge child as before. Both modes share the same ground
+ * truth, persona and VERDICT_SCHEMA contract — only the invocation (and the
+ * output-channel wording) differs.
+ */
+const JUDGE_MODE_LLM = "llm";
+const JUDGE_MODE_SUBAGENT = "subagent";
+
+/**
+ * Output-channel wording — the ONLY text difference between the two judge
+ * modes. The structured_output phrase targets the spawn path's schema tool;
+ * the JSON phrase is its one-shot stream equivalent (same VERDICT_SCHEMA
+ * contract, validated after parsing).
+ */
+const OUTPUT_VIA_STRUCTURED_TOOL = "through the structured_output tool.";
+const OUTPUT_VIA_JSON =
+  'as one JSON object of exactly the shape {"decision":"approve"|"reject","riskLevel":"low"|"medium"|"high","rationale":"two or three sentences justifying the verdict"}.';
+const PROMPT_TAIL_STRUCTURED = "Report the verdict via the structured_output tool only.";
+const PROMPT_TAIL_JSON =
+  'Respond with exactly one JSON object of exactly the shape {"decision":"approve"|"reject","riskLevel":"low"|"medium"|"high","rationale":"two or three sentences justifying the verdict"} and nothing else.';
+
+/**
+ * Shadowing persona for the judge. Identical in both modes except the output
+ * clause — assembled so the spawn-mode text stays byte-identical to the
+ * pre-1.8.0 `APPROVER_PERSONA` constant.
+ */
+function approverPersona(outputClause) {
+  return [
+    "You are an independent security approval agent inside a coding harness.",
+    "Your only job is to judge ONE request for wider sandbox access and report the verdict " + outputClause,
+    "You reject what is concretely dangerous — destructive or irreversible operations, ones that reach outside their stated purpose, or requests whose stated justification does not match the actual arguments. Mere uncertainty, an unfamiliar command, or a terse justification is never enough: every rejection must name the concrete risk the operation creates.",
+    "Your own judging session is deliberately sandboxed: approvals are disabled for YOU and your permission scope is fixed. That describes only your own environment — never cite your own constraints (or anything your runtime context says about YOUR permissions) as a property of the requesting session or as grounds for rejection.",
+    "You never ask questions, never attempt the operation yourself, and never finish with a plain-text answer.",
+  ].join(" ");
+}
+
+/** The spawn-mode persona (byte-identical to the pre-1.8.0 constant). */
+const APPROVER_PERSONA = approverPersona(OUTPUT_VIA_STRUCTURED_TOOL);
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -284,6 +351,8 @@ export class AgentApprovalService extends TypertRemoteService {
   async [Service.init]() {
     markRemoteMethod(this, "getState", "getState");
     markRemoteMethod(this, "setModel", "setModel");
+    markRemoteMethod(this, "setJudgeMode", "setJudgeMode");
+    markRemoteMethod(this, "setReviewDefault", "setReviewDefault");
     markRemoteMethod(this, "setJevConfig", "setJevConfig");
     markRemoteMethod(this, "setApprovalTimeout", "setApprovalTimeout");
     markRemoteMethod(this, "toggle", "toggle");
@@ -294,6 +363,20 @@ export class AgentApprovalService extends TypertRemoteService {
 
     /** Judge model override; empty strings = use the harness default route. */
     this._model = { provider: "", model: "" };
+    /**
+     * Judge invocation mode: "llm" (default — one direct ctx.llm.stream()
+     * call, no subagent session) or "subagent" (the isolated judge child).
+     * Persisted; the wire field is `judgeMode`.
+     */
+    this._judgeMode = JUDGE_MODE_LLM;
+    /**
+     * v1.8.0: global default for the per-call review mode — when on, FRESH
+     * sessions (no genuine user message yet) auto-enter 自动审查 at creation,
+     * subject to the Jev gate. Resumed sessions keep their folded selection;
+     * per-session switching stays in the /permission menu and /agent-review
+     * command. Persisted (`reviewDefault` in config.json).
+     */
+    this._reviewDefault = false;
     /**
      * TypeSafe Jev direct backend settings (used when `_model.provider` is
      * the synthetic `typesafe` id). The API key lives in plaintext on this
@@ -332,6 +415,14 @@ export class AgentApprovalService extends TypertRemoteService {
     // untouched.
     this.ctx.on("approval/request", (req, next) => this._onApprovalRequest(req, next), { prepend: true });
 
+    // v1.8.0: the per-call review mode claims `tools/pre-execute` before any
+    // tool body runs (the same seam the official experimental-auto-review
+    // uses), outermost via prepend — but only for sessions enabled in REVIEW
+    // mode; everyone else delegates untouched. Coverage: every native call
+    // and every started PTC inner call, excluding the outer run_code
+    // transport. Denials are final (fail-closed, no human fallback).
+    this.ctx.on("tools/pre-execute", (exec, next) => this._onPreExecute(exec, next), { prepend: true });
+
     // Permission-menu integration: react to preset selections recorded in the
     // durable log (the composer /permission control and the /permission
     // command both write `permission/preset` through permissionPresets.set).
@@ -347,7 +438,18 @@ export class AgentApprovalService extends TypertRemoteService {
           if (this._enabled.has(session.id)) return;
           const agent = this.ctx.agents.get(session.id);
           if (agent === undefined) return; // not live (yet) — agent/created covers it
-          this._enableCore(session, agent);
+          this._enableCore(session, agent, "escalation");
+        } else if (name === REVIEW_PRESET_NAME) {
+          if (this._enabled.has(session.id)) return;
+          const agent = this.ctx.agents.get(session.id);
+          if (agent === undefined) return; // not live (yet) — agent/created covers it
+          // Gate layer 3: selecting 自动审查 without a usable Jev judge must
+          // not leave Full access with nobody judging — bounce (fail closed).
+          if (!this._jevGateOk()) {
+            this._reviewGateFallback(session, agent);
+            return;
+          }
+          this._enableCore(session, agent, "review");
         } else if (this._enabled.has(session.id)) {
           this._enabled.delete(session.id);
           this._trusted.delete(session.id);
@@ -367,8 +469,37 @@ export class AgentApprovalService extends TypertRemoteService {
         const agent = payload && payload.agent;
         if (!agent || !agent.session) return;
         if (this._enabled.has(agent.session.id)) return;
-        if (this._lastKnob(agent.session, "permission/preset", "preset") !== PRESET_NAME) return;
-        this._enableCore(agent.session, agent);
+        const preset = this._lastKnob(agent.session, "permission/preset", "preset");
+        if (preset === REVIEW_PRESET_NAME) {
+          // Restart survival for 自动审查 — re-checked against the gate: a
+          // Jev key removed while the app was down fails closed to the
+          // agent-approval preset instead of restoring bare Full access.
+          if (!this._jevGateOk()) {
+            this._reviewGateFallback(agent.session, agent);
+            return;
+          }
+          this._enableCore(agent.session, agent, "review");
+          return;
+        }
+        // v1.8.0 global default (setReviewDefault): a FRESH session (no
+        // genuine user message yet) auto-enters per-call review when
+        // configured and the Jev gate is open. Resumed sessions keep their
+        // folded selection — flipping them would override past choices.
+        if (
+          this._reviewDefault &&
+          (preset === undefined || preset === PRESET_NAME) &&
+          this._isFreshSession(agent.session) &&
+          this._jevGateOk()
+        ) {
+          this._enableCore(agent.session, agent, "review");
+          if (this._presetRegistered(REVIEW_PRESET_NAME)) {
+            agent.session.append("permission/preset", { preset: REVIEW_PRESET_NAME });
+          }
+          return;
+        }
+        if (preset === PRESET_NAME) {
+          this._enableCore(agent.session, agent, "escalation");
+        }
       } catch (e) {
         /* best-effort re-arm */
       }
@@ -394,7 +525,14 @@ export class AgentApprovalService extends TypertRemoteService {
         order: 116,
         text: (context) => {
           const agent = context.agent;
-          if (agent === undefined || !this._enabled.has(agent.session.id)) return "";
+          if (agent === undefined) return "";
+          const entry = this._enabled.get(agent.session.id);
+          if (entry === undefined) return "";
+          if (entry.mode === "review") {
+            return (
+              "Per-call review mode (自动审查) is ON for this session: the sandbox base is danger-full-access, and EVERY tool call is reviewed by the Jev judge before execution. The judge sees the exact tool call and the user's actual request; risky, destructive, out-of-scope, or dishonest calls are rejected outright and their body never runs — a rejection is FINAL (no human fallback). State the exact target of each operation and its link to the task."
+            );
+          }
           const route = " routed to " + this._judgeRoute().label;
           return (
             "Agent-approval mode is ON for this session: the sandbox base is workspace-write, and every sandbox-escalation request is decided by an independent approval agent" +
@@ -424,6 +562,27 @@ export class AgentApprovalService extends TypertRemoteService {
             return { kind: "error", text: "usage: /agent-approval on|off" };
           }
           return { kind: "success", text: this._setEnabled(invocation.agent, arg === "on") };
+        },
+      });
+      scope.commands.register({
+        name: "agent-review",
+        description:
+          "Toggle per-call review (自动审查): Full access base; every tool call is reviewed by the Jev judge before execution; risky calls are rejected with no human fallback",
+        input: { hint: "<on|off>" },
+        handler: (invocation) => {
+          const arg = invocation.rawInput.trim().toLowerCase();
+          if (arg === "") {
+            const entry = this._enabled.get(invocation.agent.session.id);
+            const on = entry !== undefined && entry.mode === "review";
+            return {
+              kind: "success",
+              text: "agent-review is " + (on ? "ON" : "OFF") + " for this session (usage: /agent-review on|off)",
+            };
+          }
+          if (arg !== "on" && arg !== "off") {
+            return { kind: "error", text: "usage: /agent-review on|off" };
+          }
+          return { kind: "success", text: this._setReviewEnabled(invocation.agent, arg === "on") };
         },
       });
     });
@@ -471,16 +630,102 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
+   * v1.8.0: toggle the per-call review mode (自动审查) for one live session —
+   * the /agent-review command lands here. Enabling runs the Jev gate (layer
+   * 2 of the three-layer gate) and pins the agent-review bundle
+   * (danger-full-access + ask); disabling restores the remembered knobs
+   * through the same `_disable` core as the escalation mode.
+   */
+  _setReviewEnabled(agent, on) {
+    const session = agent.session;
+    const entry = this._enabled.get(session.id);
+    if (on) {
+      if (entry !== undefined && entry.mode === "review") return "自动审查 is already ON for this session";
+      if (entry !== undefined) {
+        return "自动审批 is already ON for this session — switch modes through the /permission menu";
+      }
+      if (!this._jevGateOk()) {
+        return "自动审查 requires the Jev judge: set the 审批模型 Provider to TypeSafe Jev with an API key in Settings → 自动审批 first";
+      }
+      this._enableCore(session, agent, "review");
+      if (this._presetRegistered(REVIEW_PRESET_NAME)) {
+        // Same shared-bundle rule as the escalation mode: the appended
+        // selection is what makes the menu display 自动审查.
+        session.append("permission/preset", { preset: REVIEW_PRESET_NAME });
+      }
+      return "自动审查 ON: sandbox base is danger-full-access; every tool call is reviewed by the Jev judge before execution (denials are final, no human fallback)";
+    }
+    if (entry === undefined || entry.mode !== "review") return "自动审查 is not ON for this session";
+    return this._disable(agent, true);
+  }
+
+  /**
    * Whether the preset table currently knows our entry. The package's
    * `cordis.patch.yml` `permission` row override registers it; without it we
    * must NOT append `permission/preset` events — the session invariant rejects
    * unknown preset names, and the menu simply will not show the mode.
    */
-  _presetRegistered() {
+  _presetRegistered(name) {
     const presets = this.ctx.get("permissionPresets");
     if (presets === undefined) return false;
     try {
-      return presets.names.includes(PRESET_NAME);
+      return presets.names.includes(name === undefined ? PRESET_NAME : name);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * v1.8.0 gate for the per-call review mode: the user must have switched the
+   * judge to TypeSafe Jev with a resolvable API key ("设置了使用 Jev").
+   * Everything about the mode is built around the Jev judge — enabling it
+   * without one would leave Full access with nobody judging.
+   */
+  _jevGateOk() {
+    return this._model.provider === JEV_PROVIDER && this._jevEffective().key !== "";
+  }
+
+  /**
+   * Gate layer 3 (fail-closed): a session whose durable log selects the
+   * agent-review preset while the Jev gate is closed must NOT sit on Full
+   * access with nobody judging. Record why, then bounce the session to the
+   * agent-approval preset (workspace-write + ask) through the canonical
+   * preset writer — which re-enters our own preset listener and arms the
+   * escalation mode. Best-effort: even if the bounce fails, no review mode
+   * is armed and the gate still holds.
+   */
+  _reviewGateFallback(session, agent) {
+    try {
+      this._record(session, {
+        at: new Date().toISOString(),
+        toolName: "(mode)",
+        reason: "(agent-review enable)",
+        args: "",
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: "gate",
+        durationMs: 0,
+        childSessionId: "",
+        rationale:
+          "自动审查 requires the Jev judge (Settings → 自动审批: Provider = TypeSafe Jev with an API key); falling back to the 自动审批 preset (fail closed)",
+        mode: "review",
+      });
+      const presets = this.ctx.get("permissionPresets");
+      if (presets !== undefined) presets.set(session, PRESET_NAME);
+    } catch (e) {
+      /* best-effort bounce; the gate holds either way */
+    }
+  }
+
+  /**
+   * Whether a session has not yet seen a genuine user message — i.e. it is
+   * being created rather than resumed. Guards the review default: a resumed
+   * session carries its past work, so its folded preset selection wins.
+   * Unknown shapes read as resumed (never hijack a session we cannot read).
+   */
+  _isFreshSession(session) {
+    try {
+      return this._recentUserContext(session).first === "";
     } catch (e) {
       return false;
     }
@@ -493,7 +738,7 @@ export class AgentApprovalService extends TypertRemoteService {
     if (presets === undefined) return undefined;
     try {
       for (const name of presets.names) {
-        if (name === PRESET_NAME) continue;
+        if (name === PRESET_NAME || name === REVIEW_PRESET_NAME) continue;
         const spec = presets.resolve(name);
         if (spec.sandbox === sandbox && spec.approval === approval) return name;
       }
@@ -507,7 +752,7 @@ export class AgentApprovalService extends TypertRemoteService {
    * Enable the judging mode and (optionally) record the preset selection so
    * the permission menu reflects the mode. Shared-bundle rule: the LAST
    * `permission/preset` event wins the derive tie against workspace-write, so
-   * the append is what makes the menu display "Agent 审批".
+   * the append is what makes the menu display "自动审批".
    */
   _enable(agent, appendPreset) {
     const session = agent.session;
@@ -525,12 +770,16 @@ export class AgentApprovalService extends TypertRemoteService {
    * The pure bookkeeping half of enabling: capture the session's EFFECTIVE
    * knob values (override ?? defaults — a session living under a `never`
    * composition default must return to `never`, not to the fold's "no
-   * override" state) and the last recorded preset selection, then pin sandbox
-   * to workspace-write and approval policy to `ask` (the waterfall — and
+   * override" state) and the last recorded preset selection, then pin the
+   * mode's sandbox base and approval policy to `ask` (the waterfall — and
    * therefore our claimer — only runs under `ask`; under `never` the approval
-   * service short-circuits to `rejected` before any listener).
+   * service short-circuits to `rejected` before any listener). v1.8.0:
+   * `mode` selects the pinned sandbox — "review" pins Full access (the
+   * agent-review preset bundle), anything else pins workspace-write.
    */
-  _enableCore(session, agent) {
+  _enableCore(session, agent, mode) {
+    const isReview = mode === "review";
+    const baseMode = isReview ? REVIEW_BASE_MODE : BASE_MODE;
     const approval = this.ctx.approval;
     const effectiveSandbox =
       this._lastKnob(session, "sandbox/mode", "mode") ??
@@ -541,8 +790,9 @@ export class AgentApprovalService extends TypertRemoteService {
       prevSandbox: effectiveSandbox,
       prevApproval: effectiveApproval,
       prevPreset: this._lastKnob(session, "permission/preset", "preset"),
+      mode: isReview ? "review" : "escalation",
     });
-    if (effectiveSandbox !== BASE_MODE) session.append("sandbox/mode", { mode: BASE_MODE });
+    if (effectiveSandbox !== baseMode) session.append("sandbox/mode", { mode: baseMode });
     approval.setPolicy(agent, "ask");
   }
 
@@ -550,17 +800,18 @@ export class AgentApprovalService extends TypertRemoteService {
    * Disable the judging mode. With `restoreKnobs` (the chip/command path) the
    * remembered values go back through the canonical setters and the menu's
    * preset selection is corrected for the restored bundle — the shared-bundle
-   * tie rule would otherwise keep displaying "Agent 审批". Without it (the
+   * tie rule would otherwise keep displaying "自动审批". Without it (the
    * user switched to another preset in the menu) we touch nothing: the preset
    * service writes its own knob events right after the selection event.
    */
   _disable(agent, restoreKnobs) {
     const session = agent.session;
     const prev = this._enabled.get(session.id);
-    if (prev === undefined) return "agent-approval is not ON for this session";
+    if (prev === undefined) return "the mode is not ON for this session";
+    const label = prev.mode === "review" ? "agent-review" : "agent-approval";
     this._enabled.delete(session.id);
     this._trusted.delete(session.id);
-    if (!restoreKnobs) return "agent-approval OFF: previous permission knobs restored";
+    if (!restoreKnobs) return label + " OFF: previous permission knobs restored";
     if (
       typeof prev.prevSandbox === "string" &&
       prev.prevSandbox !== this._lastKnob(session, "sandbox/mode", "mode")
@@ -579,6 +830,7 @@ export class AgentApprovalService extends TypertRemoteService {
       if (
         typeof prev.prevPreset === "string" &&
         prev.prevPreset !== PRESET_NAME &&
+        prev.prevPreset !== REVIEW_PRESET_NAME &&
         this._presetMatches(prev.prevPreset, prev.prevSandbox, prev.prevApproval)
       ) {
         name = prev.prevPreset;
@@ -590,7 +842,7 @@ export class AgentApprovalService extends TypertRemoteService {
       }
       if (name !== undefined) session.append("permission/preset", { preset: name });
     }
-    return "agent-approval OFF: previous permission knobs restored";
+    return label + " OFF: previous permission knobs restored";
   }
 
   /** Whether one named table entry's bundle equals the given knob values. */
@@ -686,6 +938,10 @@ export class AgentApprovalService extends TypertRemoteService {
       durationMs: Number(entry.durationMs) || 0,
       childSessionId: String(entry.childSessionId),
       rationale: String(entry.rationale),
+      // v1.8.0: escalation = sandbox-escalation review (approval/request),
+      // review = per-call review (tools/pre-execute). Old sidecar lines have
+      // no such field and fold to "escalation".
+      mode: entry.mode === "review" ? "review" : "escalation",
     };
   }
 
@@ -765,6 +1021,8 @@ export class AgentApprovalService extends TypertRemoteService {
   _persistConfig() {
     const body = JSON.stringify({
       model: { provider: this._model.provider, model: this._model.model },
+      judgeMode: this._judgeMode,
+      reviewDefault: this._reviewDefault,
       jev: this._jevShape(),
       timeoutMs: this._timeoutMs,
       rules: this._rules,
@@ -791,6 +1049,12 @@ export class AgentApprovalService extends TypertRemoteService {
           typeof cfg.model.model === "string"
         ) {
           this._model = { provider: cfg.model.provider, model: cfg.model.model };
+        }
+        if (cfg.judgeMode === JUDGE_MODE_LLM || cfg.judgeMode === JUDGE_MODE_SUBAGENT) {
+          this._judgeMode = cfg.judgeMode;
+        }
+        if (typeof cfg.reviewDefault === "boolean") {
+          this._reviewDefault = cfg.reviewDefault;
         }
         if (cfg.jev && typeof cfg.jev === "object") {
           if (typeof cfg.jev.apiKey === "string") this._jev.apiKey = cfg.jev.apiKey;
@@ -885,7 +1149,15 @@ export class AgentApprovalService extends TypertRemoteService {
     };
   }
 
-  _judgePrompt(session, req, argsRaw) {
+  /**
+   * The judge prompt: shared ground truth + approval standard, byte-identical
+   * across both invocation modes except the output-instruction tail
+   * (`PROMPT_TAIL_STRUCTURED` for the spawn path, `PROMPT_TAIL_JSON` for the
+   * one-shot stream path — see the OUTPUT_VIA_* constants).
+   */
+  _judgePrompt(session, req, argsRaw, outputTail) {
+    const tail =
+      typeof outputTail === "string" && outputTail !== "" ? outputTail : PROMPT_TAIL_STRUCTURED;
     let cwd = "";
     try {
       if (session.header && typeof session.header.cwd === "string") cwd = session.header.cwd;
@@ -924,7 +1196,7 @@ export class AgentApprovalService extends TypertRemoteService {
       "- reading tool-owned config or logs needed to debug the task at hand.",
       "REJECT when the operation is destructive (mass deletion, disk formatting, registry/service/system-wide changes), exfiltrates credentials or secrets, touches resources unrelated to the task, modifies the operating system or OTHER applications' data, hides intent behind encoded or obfuscated content, or the reason does not match the arguments.",
       "Your own judging session is deliberately sandboxed: approvals are disabled for YOU and your permission scope is fixed by design. Anything your own runtime context says about YOUR permissions describes only you — it says nothing about the requesting session, and must never be cited as a property of that session or as grounds for rejection.",
-      "REJECT only when you can name a concrete, credible risk THIS specific operation creates — what it would destroy, leak, or change beyond the user's task. Vague unease, an unfamiliar command, or a terse stated reason is NOT a concrete risk: when no concrete risk exists and the operation fits the task, APPROVE. Report the verdict via the structured_output tool only.",
+      "REJECT only when you can name a concrete, credible risk THIS specific operation creates — what it would destroy, leak, or change beyond the user's task. Vague unease, an unfamiliar command, or a terse stated reason is NOT a concrete risk: when no concrete risk exists and the operation fits the task, APPROVE. " + tail,
     );
     return lines.join("\n");
   }
@@ -1047,10 +1319,14 @@ export class AgentApprovalService extends TypertRemoteService {
     }
 
     // 3. The judge. The TypeSafe Jev backend is a direct HTTP call (no
-    //    subagent, no harness model route); anything else spawns the judge
-    //    child through the `spawn` provider as before.
+    //    subagent, no harness model route); the DEFAULT "llm" mode is one
+    //    direct ctx.llm.stream() call (no subagent either — v1.8.0); only
+    //    judgeMode === "subagent" spawns the judge child through `spawn`.
     if (this._model.provider === JEV_PROVIDER) {
       return this._judgeWithJev(session, req, argsRaw, base, trustKey);
+    }
+    if (this._judgeMode !== JUDGE_MODE_SUBAGENT) {
+      return this._judgeWithLlmStream(session, req, argsRaw, base, trustKey);
     }
 
     const route = this._judgeRoute();
@@ -1154,6 +1430,305 @@ export class AgentApprovalService extends TypertRemoteService {
     return "unavailable";
   }
 
+  // ---- the direct LLM-stream judge (default since v1.8.0) --------------------
+
+  /**
+   * The requesting session's own provider/model route, read from its request
+   * header — the concrete route a one-shot stream call needs when the judge
+   * route resolves "inherit(requester)" (no configured override and no
+   * harness default selection). Undefined when no complete route is readable.
+   */
+  _requesterRoute(session) {
+    try {
+      const header = typeof session.requestHeader === "function" ? session.requestHeader() : undefined;
+      const cfg = header && header.config;
+      if (
+        cfg &&
+        typeof cfg.provider === "string" &&
+        cfg.provider !== "" &&
+        typeof cfg.model === "string" &&
+        cfg.model !== ""
+      ) {
+        return { provider: cfg.provider, model: cfg.model };
+      }
+    } catch (e) {
+      /* header access is best-effort */
+    }
+    return undefined;
+  }
+
+  /**
+   * Judge one escalation through ONE direct Harness LLM stream call (the
+   * default judge mode since v1.8.0). Input/output mirror the subagent path
+   * exactly — same persona, same `_judgePrompt`, same VERDICT_SCHEMA verdict
+   * contract — only the invocation differs: no subagent session is created
+   * (zero judge-side context pollution; `childSessionId` stays empty).
+   * Mirrors `_judgeWithJev`'s fail-closed contract:
+   *   - no concrete route / llm fault / non-'stop' finish / malformed verdict
+   *     / timeout → `unavailable`
+   *   - request cancelled mid-flight → `cancelled`
+   */
+  async _judgeWithLlmStream(session, req, argsRaw, base, trustKey) {
+    const route = this._judgeRoute();
+    let provider = route.provider;
+    let model = route.model;
+    let label = route.label;
+    if (provider === "" || model === "") {
+      const own = this._requesterRoute(session);
+      if (own === undefined) {
+        this._record(session, {
+          ...base,
+          outcome: "unavailable",
+          riskLevel: "-",
+          model: label,
+          rationale:
+            "no concrete model route for the direct judge (no override, no harness default, no readable requester route)",
+        });
+        return "unavailable";
+      }
+      provider = own.provider;
+      model = own.model;
+      label = "inherit(" + provider + "/" + model + ")";
+    }
+    // ctx.llm is a runtime precondition (the agent loop itself cannot run
+    // without it) — no absence fallback by design (user ruling 2026-10); a
+    // somehow-missing service just resolves fail-closed with an honest line.
+    const llm = this.ctx.get("llm");
+    if (llm === undefined || typeof llm.stream !== "function") {
+      this._record(session, {
+        ...base,
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: label,
+        rationale: "the harness llm service is not composed; the direct judge cannot run (fail closed)",
+      });
+      return "unavailable";
+    }
+
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const signal = req.signal;
+    const onAbort = () => controller.abort();
+    if (signal && typeof signal.addEventListener === "function") {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    let winner;
+    try {
+      const options = {
+        provider: provider,
+        model: model,
+        system: approverPersona(OUTPUT_VIA_JSON),
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: this._judgePrompt(session, req, argsRaw, PROMPT_TAIL_JSON) }],
+          },
+        ],
+        temperature: 0,
+        signal: controller.signal,
+      };
+      winner = await Promise.race([
+        this._readLlmVerdict(llm.stream(options))
+          .then((verdict) => ({ kind: "result", verdict: verdict }))
+          .catch((error) => ({
+            kind: "fault",
+            error: error,
+            aborted: !!(error && error.name === "AbortError"),
+          })),
+        (signal
+          ? new Promise((resolve) => {
+              if (signal.aborted) {
+                resolve(true);
+                return;
+              }
+              signal.addEventListener("abort", () => resolve(true), { once: true });
+            })
+          : Promise.resolve(false)
+        ).then((v) => ({ kind: "aborted", aborted: v })),
+        this.ctx.timeout(this._timeoutMs).then(() => ({ kind: "timeout" })),
+      ]);
+    } finally {
+      if (signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onAbort);
+      }
+      // Whether the race was lost to timeout/cancel or the call already
+      // settled, closing the stream is always safe.
+      try {
+        controller.abort();
+      } catch (e) {
+        /* controller abort never blocks the outcome */
+      }
+    }
+    base.durationMs = Date.now() - startedAt;
+
+    if (winner.kind === "result") {
+      const verdict = winner.verdict;
+      const approved = verdict.decision === "approve";
+      this._record(session, {
+        ...base,
+        outcome: approved ? "allowed-once" : "rejected",
+        riskLevel: verdict.riskLevel,
+        model: label,
+        rationale: trunc(verdict.rationale, 600),
+      });
+      // Trust one approved fingerprint for the rest of the session: the next
+      // byte-identical call short-circuits before any judge runs.
+      if (approved && trustKey !== undefined) {
+        let set = this._trusted.get(session.id);
+        if (set === undefined) {
+          set = new Set();
+          this._trusted.set(session.id, set);
+        }
+        set.add(trustKey);
+      }
+      return approved ? "allowed-once" : "rejected";
+    }
+    if (winner.kind === "aborted" || (winner.kind === "fault" && winner.aborted)) {
+      this._record(session, {
+        ...base,
+        outcome: "cancelled",
+        riskLevel: "-",
+        model: label,
+        rationale: "request cancelled while the direct judge was judging",
+      });
+      return "cancelled";
+    }
+    if (winner.kind === "timeout") {
+      this._record(session, {
+        ...base,
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: label,
+        rationale: "direct judge call timed out after " + String(this._timeoutMs) + "ms (fail closed)",
+      });
+      return "unavailable";
+    }
+    this._record(session, {
+      ...base,
+      outcome: "unavailable",
+      riskLevel: "-",
+      model: label,
+      rationale: "direct judge call failed (fail closed): " + errText(winner.error),
+    });
+    return "unavailable";
+  }
+
+  /**
+   * Aggregate one `ctx.llm.stream()` response into a validated verdict.
+   * Chunk protocol (dsh-llm `StreamChunk`): `block-start` / `text-delta` /
+   * `reasoning-delta` / `tool-call-delta` / `block-end` / `usage` / `finish`.
+   * Per the verdict contract the response must be zero or more reasoning
+   * blocks followed by exactly ONE text block holding the JSON verdict, with
+   * a terminal `stop` finish. `block-end` carries the authoritative assembled
+   * block, so it replaces any deltas already counted for that index (no
+   * double counting). Every abnormal shape throws — upstream maps it to
+   * `unavailable` (fail closed); an `aborted` finish throws AbortError so the
+   * race maps it to `cancelled`.
+   */
+  async _readLlmVerdict(stream) {
+    const blocks = new Map(); // index -> { type, text }
+    let finish;
+    const entryOf = (index) => {
+      let entry = blocks.get(index);
+      if (entry === undefined) {
+        entry = { type: undefined, text: "" };
+        blocks.set(index, entry);
+      }
+      return entry;
+    };
+    for await (const chunk of stream) {
+      if (finish !== undefined) throw new Error("direct judge emitted data after its terminal finish");
+      if (!chunk || typeof chunk !== "object") continue; // merge-extensible protocol
+      if (chunk.type === "block-start") {
+        entryOf(chunk.index).type = String(chunk.blockType);
+      } else if (chunk.type === "text-delta") {
+        const entry = entryOf(chunk.index);
+        if (entry.type === undefined) entry.type = "text";
+        entry.text += String(chunk.text === undefined ? "" : chunk.text);
+      } else if (chunk.type === "reasoning-delta") {
+        const entry = entryOf(chunk.index);
+        if (entry.type === undefined) entry.type = "reasoning";
+      } else if (chunk.type === "tool-call-delta") {
+        entryOf(chunk.index).type = "tool-call";
+      } else if (chunk.type === "block-end") {
+        const block = chunk.block;
+        blocks.set(chunk.index, {
+          type: block && typeof block.type === "string" ? block.type : "text",
+          text: block && typeof block.text === "string" ? block.text : "",
+        });
+      } else if (chunk.type === "finish") {
+        finish = chunk.reason;
+      }
+      // `usage` and unknown chunk types carry no verdict content — ignored.
+    }
+    if (finish === undefined) throw new Error("direct judge stream ended without a terminal finish");
+    if (finish.kind === "aborted") {
+      const e = new Error("direct judge stream aborted");
+      e.name = "AbortError";
+      throw e;
+    }
+    if (finish.kind !== "stop") throw new Error("direct judge finished with " + String(finish.kind));
+    const ordered = [];
+    for (const entry of blocks.values()) {
+      if (entry.type === undefined) continue;
+      if ((entry.type === "text" || entry.type === "reasoning") && entry.text.trim() === "") continue;
+      ordered.push(entry);
+    }
+    if (ordered.length === 0) throw new Error("direct judge emitted no content blocks");
+    const final = ordered[ordered.length - 1];
+    if (final.type !== "text") throw new Error("direct judge must end with exactly one text block");
+    for (let i = 0; i < ordered.length - 1; i++) {
+      if (ordered[i].type !== "reasoning") {
+        throw new Error("direct judge must emit zero or more reasoning blocks followed by exactly one text block");
+      }
+    }
+    return this._verdictFromJsonText(final.text);
+  }
+
+  /**
+   * Parse one verdict JSON text against the VERDICT_SCHEMA contract — the
+   * same check `result.structured` enforces on the subagent path (three
+   * required members, `additionalProperties: false`, enum fields). Anything
+   * else throws; upstream maps that to `unavailable`.
+   */
+  _verdictFromJsonText(text) {
+    let raw = String(text).trim();
+    const fence = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    if (fence) raw = fence[1].trim();
+    let value;
+    try {
+      value = JSON.parse(raw);
+    } catch (e) {
+      const open = raw.indexOf("{");
+      const close = raw.lastIndexOf("}");
+      if (open < 0 || close <= open) throw new Error("direct judge verdict text is not JSON");
+      value = JSON.parse(raw.slice(open, close + 1));
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("direct judge verdict must be one JSON object");
+    }
+    const keys = Object.keys(value);
+    if (
+      keys.length !== 3 ||
+      value.decision === undefined ||
+      value.riskLevel === undefined ||
+      value.rationale === undefined
+    ) {
+      throw new Error("direct judge verdict must have exactly decision/riskLevel/rationale");
+    }
+    if (value.decision !== "approve" && value.decision !== "reject") {
+      throw new Error("direct judge verdict decision must be approve|reject");
+    }
+    if (value.riskLevel !== "low" && value.riskLevel !== "medium" && value.riskLevel !== "high") {
+      throw new Error("direct judge verdict riskLevel must be low|medium|high");
+    }
+    if (typeof value.rationale !== "string") {
+      throw new Error("direct judge verdict rationale must be a string");
+    }
+    return { decision: value.decision, riskLevel: value.riskLevel, rationale: value.rationale };
+  }
+
   // ---- the TypeSafe Jev direct backend ---------------------------------------
 
   /**
@@ -1230,7 +1805,7 @@ export class AgentApprovalService extends TypertRemoteService {
         outcome: "unavailable",
         riskLevel: "-",
         model: "jev(" + cfg.model + ")",
-        rationale: "Jev backend selected but no API key configured (Settings → Agent 审批, or the TYPESAFE_API_KEY environment variable)",
+        rationale: "Jev backend selected but no API key configured (Settings → 自动审批, or the TYPESAFE_API_KEY environment variable)",
       });
       return "unavailable";
     }
@@ -1309,8 +1884,10 @@ export class AgentApprovalService extends TypertRemoteService {
     return "unavailable";
   }
 
-  /** The single POST to the System One endpoint; resolves the parsed body. */
-  async _jevRequest(cfg, state, abortSignal) {
+  /** The single POST to the System One endpoint; resolves the parsed body.
+   *  `questions` defaults to the escalation set; the review path passes
+   *  `JEV_REVIEW_QUESTIONS`. */
+  async _jevRequest(cfg, state, abortSignal, questions) {
     const response = await fetch(cfg.endpoint, {
       method: "POST",
       headers: {
@@ -1320,7 +1897,7 @@ export class AgentApprovalService extends TypertRemoteService {
       body: JSON.stringify({
         state: state,
         model: cfg.model,
-        questions: JEV_QUESTIONS,
+        questions: questions === undefined ? JEV_QUESTIONS : questions,
       }),
       signal: abortSignal,
     });
@@ -1339,12 +1916,15 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
-   * Map a Jev response to the same outcomes the subagent path produces.
-   * Returns the waterfall outcome string; records the audit line itself.
+   * Parse + gate one Jev response into a normalized verdict, shared by the
+   * escalation path (`_jevVerdict`) and the per-call review path
+   * (`_reviewWithJev`) so both judge to exactly the same standard:
+   *   - `{ kind: "malformed", served }` — any missing/out-of-shape answer
+   *   - `{ kind: "low-confidence", served, choice, riskLevel, confidence, gate }`
+   *   - `{ kind: "verdict", served, choice, riskLevel, rationale }`
    */
-  _jevVerdict(session, body, cfg, base, trustKey, durationMs) {
+  _jevParse(body, cfg) {
     const served = typeof body.model === "string" && body.model !== "" ? body.model : cfg.model;
-    const label = "jev(" + served + ")";
     const answers = body.answers && typeof body.answers === "object" ? body.answers : {};
     const decision = answers.decision && typeof answers.decision === "object" ? answers.decision : undefined;
     const risk = answers.riskLevel && typeof answers.riskLevel === "object" ? answers.riskLevel : undefined;
@@ -1366,30 +1946,20 @@ export class AgentApprovalService extends TypertRemoteService {
       riskChoice === undefined ||
       !Number.isFinite(probeNoul)
     ) {
-      this._record(session, {
-        ...base,
-        durationMs: durationMs,
-        outcome: "unavailable",
-        riskLevel: "-",
-        model: label,
-        rationale: "Jev returned no valid verdict shape (decision/riskLevel/concreteRisk incomplete)",
-      });
-      return "unavailable";
+      return { kind: "malformed", served: served };
     }
 
     // Confidence gate: below the threshold the model is not sure enough to
     // decide at all — never a grant, never a recorded rejection.
     if (confidence < cfg.confidence) {
-      this._record(session, {
-        ...base,
-        durationMs: durationMs,
-        outcome: "unavailable",
+      return {
+        kind: "low-confidence",
+        served: served,
+        choice: choice,
         riskLevel: riskChoice,
-        model: label,
-        rationale:
-          "Jev confidence " + confidence.toFixed(2) + " is below the gate " + cfg.confidence.toFixed(2) + " (decision draft: " + choice + ") — fail closed",
-      });
-      return "unavailable";
+        confidence: confidence,
+        gate: cfg.confidence,
+      };
     }
 
     const pApprove = Number(probabilities.approve);
@@ -1418,15 +1988,47 @@ export class AgentApprovalService extends TypertRemoteService {
       (riskParts.length > 0 ? "（" + riskParts.join("，") + "）" : "") +
       "；具体风险概率=" + probeNoul.toFixed(2) +
       "。Jev 为结构化决策模型，不生成文字，本理由由概率分布合成。";
+    return { kind: "verdict", served: served, choice: choice, riskLevel: riskChoice, rationale: rationale };
+  }
 
+  /**
+   * Map a Jev response to the same outcomes the subagent path produces.
+   * Returns the waterfall outcome string; records the audit line itself.
+   */
+  _jevVerdict(session, body, cfg, base, trustKey, durationMs) {
+    const parsed = this._jevParse(body, cfg);
+    const label = "jev(" + parsed.served + ")";
     base.durationMs = durationMs;
-    const approved = choice === "approve";
+
+    if (parsed.kind === "malformed") {
+      this._record(session, {
+        ...base,
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: label,
+        rationale: "Jev returned no valid verdict shape (decision/riskLevel/concreteRisk incomplete)",
+      });
+      return "unavailable";
+    }
+    if (parsed.kind === "low-confidence") {
+      this._record(session, {
+        ...base,
+        outcome: "unavailable",
+        riskLevel: parsed.riskLevel,
+        model: label,
+        rationale:
+          "Jev confidence " + parsed.confidence.toFixed(2) + " is below the gate " + parsed.gate.toFixed(2) + " (decision draft: " + parsed.choice + ") — fail closed",
+      });
+      return "unavailable";
+    }
+
+    const approved = parsed.choice === "approve";
     this._record(session, {
       ...base,
       outcome: approved ? "allowed-once" : "rejected",
-      riskLevel: riskChoice,
+      riskLevel: parsed.riskLevel,
       model: label,
-      rationale: trunc(rationale, 600),
+      rationale: trunc(parsed.rationale, 600),
     });
     if (approved && trustKey !== undefined) {
       let set = this._trusted.get(session.id);
@@ -1437,6 +2039,311 @@ export class AgentApprovalService extends TypertRemoteService {
       set.add(trustKey);
     }
     return approved ? "allowed-once" : "rejected";
+  }
+
+  // ---- v1.8.0 per-call review mode (agent-review) ----------------------------
+
+  /**
+   * The `tools/pre-execute` waterfall listener (outermost via prepend).
+   * Claims every call of a REVIEW-enabled session before its body runs;
+   * everything else delegates via `next()` OUTSIDE any try/catch (a failure
+   * deeper in the chain keeps its own semantics). Coverage mirrors the
+   * official auto-review: every native call and every started PTC inner call
+   * (`exec.parent`), with the outer `run_code` transport deliberately
+   * excluded. Denials are FINAL (fail-closed, no human fallback — user
+   * ruling 2026-10): reject, low confidence, timeout and infrastructure
+   * faults all deny the call without executing its body.
+   */
+  async _onPreExecute(exec, next) {
+    let session;
+    try {
+      const agent = exec && exec.agent;
+      const s = agent && agent.session;
+      if (s === undefined || s === null) return await next();
+      if (exec.parent === undefined && String(exec.name) === RUN_CODE_TOOL) return await next();
+      const entry = this._enabled.get(s.id);
+      if (entry === undefined || entry.mode !== "review") return await next();
+      session = s;
+    } catch (e) {
+      // A broken claim check must not fail closed for the (vast majority)
+      // non-review sessions — delegate exactly like an unclaimed call.
+      return await next();
+    }
+
+    let verdict;
+    try {
+      verdict = await this._reviewCall(session, exec);
+    } catch (e) {
+      verdict = this._reviewDeny(String(exec && exec.name), "reviewer fault (fail closed): " + errText(e));
+    }
+    if (verdict === undefined) return await next();
+    return verdict;
+  }
+
+  /**
+   * The review-mode decision chain for one pending call: deterministic rules
+   * → session trust cache → the Jev judge. Returns `undefined` to allow (the
+   * caller then delegates `next()`), otherwise a final pre-execute decision.
+   */
+  async _reviewCall(session, exec) {
+    const startedAt = new Date().toISOString();
+    const t0 = Date.now();
+    const toolName = String(exec.name);
+    let argsRaw;
+    try {
+      argsRaw = exec.arguments === undefined ? "" : JSON.stringify(exec.arguments);
+    } catch (e) {
+      argsRaw = undefined;
+    }
+    const base = {
+      at: startedAt,
+      toolName: toolName,
+      reason: "(per-call review — tools/pre-execute carries no stated reason)",
+      args: trunc(typeof argsRaw === "string" ? argsRaw : "", 2000),
+      durationMs: 0,
+      childSessionId: "",
+      mode: "review",
+    };
+
+    // 1. Deterministic rules run BEFORE the judge — zero latency, zero cost.
+    //    Deny beats allow; both are recorded for audit.
+    const rule = this._matchRules(toolName, argsRaw);
+    if (rule !== undefined) {
+      const text =
+        (rule.effect === "deny" ? "matched deny rule" : "matched allow rule") +
+        " [tool=" + rule.tool + (rule.match !== "" ? " match=" + rule.match : "") + "]" +
+        (rule.note !== "" ? " — " + rule.note : "");
+      base.durationMs = Date.now() - t0;
+      this._record(session, {
+        ...base,
+        outcome: rule.effect === "deny" ? "rejected" : "allowed-once",
+        riskLevel: "-",
+        model: "rule",
+        rationale: trunc(text, 600),
+      });
+      if (rule.effect === "deny") return this._reviewDeny(toolName, text);
+      return undefined;
+    }
+
+    // 2. Session trust: a byte-identical call (same tool, same arguments JSON)
+    //    already approved in this session runs without judging.
+    const trustKey = typeof argsRaw === "string" ? toolName + "\n" + argsRaw : undefined;
+    const trusted = this._trusted.get(session.id);
+    if (trustKey !== undefined && trusted !== undefined && trusted.has(trustKey)) {
+      base.durationMs = Date.now() - t0;
+      this._record(session, {
+        ...base,
+        outcome: "allowed-once",
+        riskLevel: "-",
+        model: "trust",
+        rationale: "trusted: an identical operation was already approved in this session",
+      });
+      return undefined;
+    }
+
+    // 3. The Jev judge — the ONLY review judge (the mode is gated on Jev).
+    return this._reviewWithJev(session, exec, argsRaw, base, trustKey);
+  }
+
+  /**
+   * The final fail-closed denial for one review-mode call. No human fallback:
+   * the tool result carries the structured detail (official auto-review deny
+   * card shape) and the rationale goes to the audit trail as usual.
+   */
+  _reviewDeny(toolName, reason) {
+    return {
+      kind: "deny",
+      reason: 'Agent review rejected tool "' + toolName + '"; its body was not executed',
+      info: {
+        name: REVIEW_DENIED_NAME,
+        code: REVIEW_DENIED_CODE,
+        reason: trunc(String(reason), 600),
+      },
+    };
+  }
+
+  /**
+   * The `state` for one per-call review: `_jevStateOf`'s ground truth plus
+   * the pending tool's schema (the official reviewer also receives the
+   * schema). Schema lookup is best-effort: `exec.schema` (PTC inner) or the
+   * request header's tool list (native).
+   */
+  _reviewStateOf(session, exec, argsRaw) {
+    const state = this._jevStateOf(session, { toolName: String(exec.name), reason: "" }, argsRaw);
+    let schema = exec.schema;
+    if (schema === undefined || schema === null) {
+      try {
+        const header = typeof session.requestHeader === "function" ? session.requestHeader() : undefined;
+        const tools = header && Array.isArray(header.tools) ? header.tools : [];
+        for (const t of tools) {
+          if (t && t.name === exec.name) {
+            schema = t;
+            break;
+          }
+        }
+      } catch (e) {
+        /* schema lookup is best-effort */
+      }
+    }
+    let parametersText = "(not available)";
+    try {
+      if (schema && schema.parameters) parametersText = trunc(JSON.stringify(schema.parameters), 2000) || "(empty)";
+    } catch (e) {
+      /* unserializable schema degrades to (not available) */
+    }
+    return {
+      ...state,
+      statedReason: "(none — per-call review has no stated reason)",
+      toolDescription:
+        schema && typeof schema.description === "string" && schema.description !== ""
+          ? trunc(schema.description, 600)
+          : "(not available)",
+      toolParameters: parametersText,
+    };
+  }
+
+  /**
+   * Judge one pending call through the Jev HTTP API (the review-mode judge).
+   * Mirrors `_judgeWithJev`'s fail-closed contract exactly — same `_jevParse`
+   * standard, same confidence gate — but every outcome is FINAL: rejections,
+   * low confidence, timeouts and faults all deny the call (no human
+   * fallback). Returns `undefined` to allow, otherwise a pre-execute
+   * decision.
+   */
+  async _reviewWithJev(session, exec, argsRaw, base, trustKey) {
+    const cfg = this._jevEffective();
+    const toolName = String(exec.name);
+    if (cfg.key === "") {
+      this._record(session, {
+        ...base,
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: "jev(" + cfg.model + ")",
+        rationale: "review judge selected but no API key configured (Settings → 自动审批, or the TYPESAFE_API_KEY environment variable)",
+      });
+      return this._reviewDeny(toolName, "no Jev API key configured (fail closed)");
+    }
+
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const signal = exec.signal;
+    const onAbort = () => controller.abort();
+    if (signal && typeof signal.addEventListener === "function") {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    let winner;
+    try {
+      const state = this._reviewStateOf(session, exec, argsRaw);
+      winner = await Promise.race([
+        this._jevRequest(cfg, state, controller.signal, JEV_REVIEW_QUESTIONS)
+          .then((body) => ({ kind: "result", body: body }))
+          .catch((error) => ({
+            kind: "fault",
+            error: error,
+            aborted: !!(error && error.name === "AbortError"),
+          })),
+        (signal
+          ? new Promise((resolve) => {
+              if (signal.aborted) {
+                resolve(true);
+                return;
+              }
+              signal.addEventListener("abort", () => resolve(true), { once: true });
+            })
+          : Promise.resolve(false)
+        ).then((v) => ({ kind: "aborted", aborted: v })),
+        this.ctx.timeout(this._timeoutMs).then(() => ({ kind: "timeout" })),
+      ]);
+    } finally {
+      if (signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onAbort);
+      }
+      try {
+        controller.abort();
+      } catch (e) {
+        /* controller abort never blocks the outcome */
+      }
+    }
+    const durationMs = Date.now() - startedAt;
+    base.durationMs = durationMs;
+
+    if (winner.kind === "result") {
+      const parsed = this._jevParse(winner.body, cfg);
+      const label = "jev(" + parsed.served + ")";
+      if (parsed.kind === "malformed") {
+        this._record(session, {
+          ...base,
+          outcome: "unavailable",
+          riskLevel: "-",
+          model: label,
+          rationale: "Jev returned no valid verdict shape (decision/riskLevel/concreteRisk incomplete)",
+        });
+        return this._reviewDeny(toolName, "Jev returned no valid verdict shape (fail closed)");
+      }
+      if (parsed.kind === "low-confidence") {
+        this._record(session, {
+          ...base,
+          outcome: "unavailable",
+          riskLevel: parsed.riskLevel,
+          model: label,
+          rationale:
+            "Jev confidence " + parsed.confidence.toFixed(2) + " is below the gate " + parsed.gate.toFixed(2) + " (decision draft: " + parsed.choice + ") — fail closed",
+        });
+        return this._reviewDeny(
+          toolName,
+          "Jev confidence below the gate (fail closed, decision draft: " + parsed.choice + ")",
+        );
+      }
+      const approved = parsed.choice === "approve";
+      this._record(session, {
+        ...base,
+        outcome: approved ? "allowed-once" : "rejected",
+        riskLevel: parsed.riskLevel,
+        model: label,
+        rationale: trunc(parsed.rationale, 600),
+      });
+      if (approved) {
+        if (trustKey !== undefined) {
+          let set = this._trusted.get(session.id);
+          if (set === undefined) {
+            set = new Set();
+            this._trusted.set(session.id, set);
+          }
+          set.add(trustKey);
+        }
+        return undefined;
+      }
+      return this._reviewDeny(toolName, parsed.rationale);
+    }
+    if (winner.kind === "aborted" || (winner.kind === "fault" && winner.aborted)) {
+      this._record(session, {
+        ...base,
+        outcome: "cancelled",
+        riskLevel: "-",
+        model: "jev(" + cfg.model + ")",
+        rationale: "request cancelled while the review judge was judging",
+      });
+      return { kind: "cancel" };
+    }
+    if (winner.kind === "timeout") {
+      this._record(session, {
+        ...base,
+        outcome: "unavailable",
+        riskLevel: "-",
+        model: "jev(" + cfg.model + ")",
+        rationale: "review judge timed out after " + String(this._timeoutMs) + "ms (fail closed)",
+      });
+      return this._reviewDeny(toolName, "review judge timed out (fail closed)");
+    }
+    this._record(session, {
+      ...base,
+      outcome: "unavailable",
+      riskLevel: "-",
+      model: "jev(" + cfg.model + ")",
+      rationale: "review judge failed (fail closed): " + errText(winner.error),
+    });
+    return this._reviewDeny(toolName, "review judge failed (fail closed): " + errText(winner.error));
   }
 
   // ---- Remote API ------------------------------------------------------------
@@ -1480,6 +2387,9 @@ export class AgentApprovalService extends TypertRemoteService {
       ok: true,
       value: {
         model: { provider: this._model.provider, model: this._model.model },
+        judgeMode: this._judgeMode,
+        reviewAvailable: this._jevGateOk(),
+        reviewDefault: this._reviewDefault,
         jev: this._jevShape(),
         timeoutMs: this._timeoutMs,
         enabledSessions: this._sessionInfos(),
@@ -1505,6 +2415,40 @@ export class AgentApprovalService extends TypertRemoteService {
     }
     this._persistConfig();
     return { ok: true, value: { model: { provider: this._model.provider, model: this._model.model } } };
+  }
+
+  /**
+   * Set the judge invocation mode: "llm" (default — one direct
+   * `ctx.llm.stream()` call per judgment, no subagent session) or "subagent"
+   * (the isolated judge child as before). Input/output and verdict semantics
+   * are identical across modes; only the invocation differs. Persisted.
+   */
+  async setJudgeMode(request) {
+    const mode = request && typeof request.mode === "string" ? request.mode : "";
+    if (mode !== JUDGE_MODE_LLM && mode !== JUDGE_MODE_SUBAGENT) {
+      return {
+        ok: false,
+        error: { code: "invalid-judge-mode", message: 'mode must be "llm" or "subagent"' },
+      };
+    }
+    this._judgeMode = mode;
+    this._persistConfig();
+    return { ok: true, value: { judgeMode: this._judgeMode } };
+  }
+
+  /**
+   * v1.8.0: the global default for the per-call review mode. When on, FRESH
+   * sessions (no genuine user message yet) auto-enter 自动审查 at creation,
+   * subject to the Jev gate (gate closed → the normal default applies and a
+   * default `agent-review` fill-in still bounces to 自动审批). Resumed
+   * sessions are never touched — their folded preset selection wins. The
+   * per-session switch stays in the /permission menu and /agent-review.
+   * Persisted.
+   */
+  async setReviewDefault(request) {
+    this._reviewDefault = !!(request && request.on);
+    this._persistConfig();
+    return { ok: true, value: { reviewDefault: this._reviewDefault } };
   }
 
   /**

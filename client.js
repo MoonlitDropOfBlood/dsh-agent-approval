@@ -11,14 +11,14 @@
  *      session — restored with it after a restart, gone when the session is
  *      deleted. Rows offer the one-click「加白」rule shortcut.
  *
- *   2. A "Agent 审批" page in the Settings panel (`settings.section`):
+ *   2. A "自动审批" page in the Settings panel (`settings.section`):
  *      approval model picker (provider + model, the harness default, or the
  *      TypeSafe Jev direct HTTP backend with its API key / endpoint /
  *      confidence-gate settings), judge timeout setting (fail-closed), the
  *      list of sessions with the mode enabled (session-list title +
  *      workspace), and the allow/deny rule table.
  *
- * Session-level on/off lives in the /permission menu (the "Agent 审批"
+ * Session-level on/off lives in the /permission menu (the "自动审批"
  * preset, registered by the package's cordis.patch.yml bundle patch) and the
  * /agent-approval command — deliberately NO composer chip: a second toggle
  * beside the permission menu it belongs to was redundant.
@@ -98,6 +98,15 @@ window.__ModuleLoader__.load({
    would be an uninvited extra and is deliberately left unmarked. */
 [data-dsh-agent-approval-perm-item]::before,
 [data-dsh-agent-approval-perm-trigger]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat}
+
+/* 自动审查 (agent-review) menu row: same shield-glyph treatment as the
+   自动审批 row (same glyph-set guard), and hidden outright while the Jev gate
+   is closed (body[data-...-review-gate="off"], set from getState()
+   .reviewAvailable) — the mode cannot run without the Jev judge, so the host
+   would bounce the selection back anyway. */
+[data-dsh-agent-approval-review-gate="off"] [data-dsh-agent-approval-review-item]{display:none}
+[data-dsh-agent-approval-review-item]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat}
+.aapr-mode-review{margin-left:6px;font-size:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:4px;padding:0 4px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
 `;
 
     // ---- Settings nav icon --------------------------------------------------
@@ -106,7 +115,12 @@ window.__ModuleLoader__.load({
     // paints a generic gear for every external section. Mark only this
     // plugin's localized nav row so the CSS above can replace the fallback
     // gear; the disposer clears the marker for HMR / plugin disable.
-    const SETTINGS_LABEL = "Agent 审批";
+    // Settings nav icon row text === settings.section label === permission
+    // preset display name (the two stay identical by convention — see
+    // AGENTS.md): 自动审批 as of v1.8.0 (renamed from "Agent 审批").
+    const SETTINGS_LABEL = "自动审批";
+    /** The agent-review preset display name (permission menu row). */
+    const REVIEW_LABEL = "自动审查";
     const SETTINGS_NAV_MARKER = "data-dsh-agent-approval-settings-nav";
 
     function registerSettingsNavIcon(label) {
@@ -217,6 +231,62 @@ window.__ModuleLoader__.load({
       };
     }
 
+    // ---- 自动审查 menu row + Jev gate visibility -----------------------------
+    // Marks the agent-review preset's /permission menu row (same guarded
+    // marking as the 自动审批 row) and hides it while the Jev gate is closed:
+    // the review mode cannot run without the Jev judge, so offering the row
+    // would only bounce the user back (the host-side gate fallback keeps them
+    // safe either way). Gate snapshot comes from getState().reviewAvailable.
+    const REVIEW_ITEM_MARKER = "data-dsh-agent-approval-review-item";
+    const REVIEW_GATE_ATTR = "data-dsh-agent-approval-review-gate";
+
+    function setReviewGate(available) {
+      try {
+        document.body.setAttribute(REVIEW_GATE_ATTR, available ? "on" : "off");
+      } catch (e) {
+        /* body may be unavailable during teardown */
+      }
+    }
+
+    function registerReviewMenuItem(label) {
+      let disposed = false;
+      const sync = function () {
+        if (disposed) return;
+        const currentLabel = String(label).trim();
+        if (currentLabel.length === 0) return;
+        const menus = document.querySelectorAll('[role="menu"]');
+        const glyphMenus = [];
+        for (let i = 0; i < menus.length; i++) {
+          if (menus[i].querySelector('span[class*="itemIcon"]') !== null) glyphMenus.push(menus[i]);
+        }
+        const items = document.querySelectorAll('[role="menu"] button[role="menuitem"]');
+        for (let i = 0; i < items.length; i++) {
+          const button = items[i];
+          const text = button.textContent ? button.textContent.trim() : "";
+          const menu = button.closest('[role="menu"]');
+          if (text === currentLabel && menu !== null && glyphMenus.indexOf(menu) !== -1) {
+            button.setAttribute(REVIEW_ITEM_MARKER, "");
+          } else {
+            button.removeAttribute(REVIEW_ITEM_MARKER);
+          }
+        }
+      };
+      sync();
+      const observer = new MutationObserver(sync);
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      return function () {
+        disposed = true;
+        observer.disconnect();
+        const marked = document.querySelectorAll("[" + REVIEW_ITEM_MARKER + "]");
+        for (let i = 0; i < marked.length; i++) marked[i].removeAttribute(REVIEW_ITEM_MARKER);
+        try {
+          document.body.removeAttribute(REVIEW_GATE_ATTR);
+        } catch (e) {
+          /* teardown only */
+        }
+      };
+    }
+
     // ---- Client Remote contribution -------------------------------------------
     // The browser-side `remote.agentApproval` service only exists after this
     // module mounts its namespace via ctx.remote.$mount(): dsh-api-remotes'
@@ -262,6 +332,24 @@ window.__ModuleLoader__.load({
           invocation: { kind: "direct" },
           parameters: param("dsh-agent-approval#AgentApprovalSetModelRequest"),
           result: result("dsh-agent-approval#AgentApprovalSetModelResult"),
+        },
+        {
+          id: "dsh-agent-approval#agentApproval/setJudgeMode",
+          service: "agentApproval",
+          namespace: "agentApproval",
+          method: "setJudgeMode",
+          invocation: { kind: "direct" },
+          parameters: param("dsh-agent-approval#AgentApprovalSetJudgeModeRequest"),
+          result: result("dsh-agent-approval#AgentApprovalSetJudgeModeResult"),
+        },
+        {
+          id: "dsh-agent-approval#agentApproval/setReviewDefault",
+          service: "agentApproval",
+          namespace: "agentApproval",
+          method: "setReviewDefault",
+          invocation: { kind: "direct" },
+          parameters: param("dsh-agent-approval#AgentApprovalSetReviewDefaultRequest"),
+          result: result("dsh-agent-approval#AgentApprovalSetReviewDefaultResult"),
         },
         {
           id: "dsh-agent-approval#agentApproval/setJevConfig",
@@ -348,8 +436,26 @@ window.__ModuleLoader__.load({
       // the official permissionGlyphs map; no public registration seam).
       ctx.effect(() => registerPermissionGlyphIcon(SETTINGS_LABEL));
 
+      // Mark the 自动审查 menu row (same glyph-set guard) and hide it while
+      // the Jev gate is closed; the same snapshot feeds the Settings card.
+      ctx.effect(() => registerReviewMenuItem(REVIEW_LABEL));
+
       // ctx.get() reads the service without the property-accessor inject guard.
       const remote = ctx.get("remote.agentApproval");
+
+      // Jev gate snapshot (also flips the 自动审查 menu row's visibility).
+      // Guarded: a degraded/old remote surface fails the gate closed.
+      if (remote && typeof remote.getState === "function") {
+        remote
+          .getState()
+          .then((res) => {
+            const s = pick(res);
+            setReviewGate(s.reviewAvailable === true);
+          })
+          .catch(() => setReviewGate(false));
+      } else {
+        setReviewGate(false);
+      }
 
       // ---- helpers -----------------------------------------------------------
 
@@ -411,7 +517,7 @@ window.__ModuleLoader__.load({
       }
 
       // NOTE: no composer chip anymore. The mode lives in the /permission
-      // menu as the "Agent 审批" preset (same place users switch Read-only /
+      // menu as the "自动审批" preset (same place users switch Read-only /
       // Workspace Write / Full access); a second toggle beside that menu was
       // redundant. Enabling surfaces: the menu, the /agent-approval command,
       // and this Settings page (whose session chips can also disable one).
@@ -427,6 +533,16 @@ window.__ModuleLoader__.load({
         const setProvider = providerSlot[1];
         const modelSlot = React.useState("");
         const setModel = modelSlot[1];
+        // Judge invocation mode (v1.8.0): "llm" (default, one direct stream
+        // call — no subagent session) / "subagent" (isolated judge child).
+        const judgeModeSlot = React.useState("llm");
+        const judgeMode = judgeModeSlot[0];
+        const setJudgeMode = judgeModeSlot[1];
+        // v1.8.0: global default — fresh sessions auto-enter 自动审查
+        // (Jev-gated); shown as the 逐调用审查 switch when Provider = Jev.
+        const reviewDefaultSlot = React.useState(false);
+        const reviewDefault = reviewDefaultSlot[0];
+        const setReviewDefault = reviewDefaultSlot[1];
         const timeoutSlot = React.useState("");
         const setTimeoutDraft = timeoutSlot[1];
         // Jev backend drafts (edited in the Jev card shown when the judge
@@ -456,6 +572,12 @@ window.__ModuleLoader__.load({
               setState(s);
               setProvider(s.model.provider);
               setModel(s.model.model);
+              // A not-yet-restarted old host sends no `judgeMode` — default.
+              setJudgeMode(s.judgeMode === "subagent" ? "subagent" : "llm");
+              // Gate snapshot also hides/shows the 自动审查 menu row.
+              setReviewGate(s.reviewAvailable === true);
+              // A not-yet-restarted old host sends no `reviewDefault` — off.
+              setReviewDefault(s.reviewDefault === true);
               setTimeoutDraft(String(s.timeoutMs));
               // A not-yet-restarted old host sends no `jev` field — keep drafts.
               setJevKey(s.jev && typeof s.jev.apiKey === "string" ? s.jev.apiKey : "");
@@ -486,6 +608,40 @@ window.__ModuleLoader__.load({
             .then(() => {
               refresh();
               setNote("审批模型已保存");
+            })
+            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+        };
+        const saveJudgeMode = (mode) => {
+          if (typeof remote.setJudgeMode !== "function") {
+            setNote("Host 半未更新（缺少 setJudgeMode）：请重装本插件并重启 DSH。");
+            return;
+          }
+          remote
+            .setJudgeMode({ mode: mode })
+            .then(() => {
+              setJudgeMode(mode);
+              setNote(
+                mode === "subagent"
+                  ? "裁决方式已保存：隔离子代理（每次裁决创建一个审批子会话）"
+                  : "裁决方式已保存：LLM 直连（不创建子会话，零上下文污染）",
+              );
+            })
+            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+        };
+        const saveReviewDefault = (on) => {
+          if (typeof remote.setReviewDefault !== "function") {
+            setNote("Host 半未更新（缺少 setReviewDefault）：请重装本插件并重启 DSH。");
+            return;
+          }
+          remote
+            .setReviewDefault({ on: on })
+            .then(() => {
+              setReviewDefault(on);
+              setNote(
+                on
+                  ? "逐调用审查已开启：新开会话自动进入自动审查（Jev 判定每个工具调用）"
+                  : "逐调用审查已关闭：新会话按默认预设开启",
+              );
             })
             .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
         };
@@ -604,13 +760,13 @@ window.__ModuleLoader__.load({
           h(
             "div",
             { className: "aapr-card" },
-            h("h3", null, "Agent 审批权限"),
+            h("h3", null, "自动审批权限"),
             h(
               "div",
               { className: "aapr-muted" },
               "一种新的权限模式：以 workspace-write 为基线沙箱；当工具请求提权（更宽的沙箱）时，由一个独立的审批 Agent 评估风险——安全、可逆、与任务相符的操作自动批准，破坏性、不可逆、越界或理由不符的操作直接拒绝。",
               h("br", null),
-              "在输入框 /permission 菜单选择「Agent 审批」预设，或执行命令 /agent-approval on|off 为会话开启；每个会话的审批审计记录在该会话窗口顶部的「审批」标签页（轨迹旁），随会话保存。",
+              "在输入框 /permission 菜单选择「自动审批」预设，或执行命令 /agent-approval on|off 为会话开启；每个会话的审批审计记录在该会话窗口顶部的「审批」标签页（轨迹旁），随会话保存。",
             ),
             note !== "" ? h("div", { className: "aapr-muted" }, note) : null,
           ),
@@ -660,6 +816,34 @@ window.__ModuleLoader__.load({
               h(ui.Button, { variant: "primary", size: "sm", onClick: saveModel }, "保存"),
             ),
             h("div", { className: "aapr-muted" }, defaultHint),
+            provider !== "typesafe"
+              ? h(
+                  "div",
+                  { className: "aapr-row" },
+                  h(
+                    "label",
+                    null,
+                    "裁决方式：",
+                    h(
+                      "select",
+                      {
+                        className: "aapr-select",
+                        value: judgeMode,
+                        onChange: (e) => saveJudgeMode(e.target.value),
+                      },
+                      h("option", { value: "llm" }, "LLM 直连（默认，不创建子会话）"),
+                      h("option", { value: "subagent" }, "隔离子代理（legacy，创建审批子会话）"),
+                    ),
+                  ),
+                )
+              : null,
+            provider !== "typesafe"
+              ? h(
+                  "div",
+                  { className: "aapr-muted" },
+                  "LLM 直连与隔离子代理是同一套审批人格、提示词与裁决格式（{decision, riskLevel, rationale}），仅调用方式不同：前者一次直连模型调用完成裁决、不启动审批子代理（零上下文污染）；后者每次裁决创建一个独立子会话（v1.8.0 前的唯一行为）。TypeSafe Jev 后端不受此设置影响。",
+                )
+              : null,
           ),
           provider === "typesafe"
             ? h(
@@ -730,6 +914,46 @@ window.__ModuleLoader__.load({
                 ),
               )
             : null,
+          provider === "typesafe"
+            ? h(
+                "div",
+                { className: "aapr-card" },
+                h("h3", null, "自动审查（逐调用审查）"),
+                h(
+                  "div",
+                  { className: "aapr-row" },
+                  h(
+                    "label",
+                    null,
+                    "逐调用审查：",
+                    h(
+                      "select",
+                      {
+                        className: "aapr-select",
+                        value: reviewDefault ? "on" : "off",
+                        disabled: state !== null && state.reviewAvailable !== true,
+                        onChange: (e) => saveReviewDefault(e.target.value === "on"),
+                      },
+                      h("option", { value: "on" }, "开（新会话自动审查每个工具调用）"),
+                      h("option", { value: "off" }, "关（新会话按默认预设）"),
+                    ),
+                  ),
+                ),
+                h(
+                  "div",
+                  { className: "aapr-muted" },
+                  "开启后，新开会话自动进入自动审查：以 danger-full-access 为基线，每个工具调用（含 PTC 内层调用，外层 run_code 传输除外）执行前经 Jev 判定一次——风险调用直接拒绝、body 不执行、不转人工（fail-closed，拒绝即最终结论）。规则表与会话内信任缓存先行短路降噪；命中拒绝规则、Jev 判拒、低置信、超时、网络故障一律拒绝该调用（工具卡片显示 AGENT_REVIEW_DENIED 详情与风险理由）。",
+                  h("br", null),
+                  "已存在的会话不受此开关影响，可用 /permission 菜单「自动审查」或 /agent-review on|off 单独切换。审计逐调用记录在「审批」标签页（工具列标注「逐调用」）。",
+                  h("br", null),
+                  state === null
+                    ? "状态加载中…"
+                    : state.reviewAvailable === true
+                      ? "当前状态：Jev 判定可用。"
+                      : "当前状态：Jev 判定不可用（缺 API Key），开关已禁用，新会话不会自动审查。",
+                ),
+              )
+            : null,
           h(
             "div",
             { className: "aapr-card" },
@@ -754,7 +978,7 @@ window.__ModuleLoader__.load({
             state === null
               ? h("div", { className: "aapr-muted" }, "加载中…")
               : state.enabledSessions.length === 0
-                ? h("div", { className: "aapr-muted" }, "当前没有会话开启 Agent 审批。")
+                ? h("div", { className: "aapr-muted" }, "当前没有会话开启自动审批/自动审查。")
                 : h(
                     "div",
                     { className: "aapr-row" },
@@ -783,7 +1007,7 @@ window.__ModuleLoader__.load({
                           : null,
                         h(
                           "button",
-                          { onClick: () => disableSession(sid), title: "关闭该会话的 Agent 审批" },
+                          { onClick: () => disableSession(sid), title: "关闭该会话的自动审批/自动审查" },
                           "✕",
                         ),
                       );
@@ -918,9 +1142,9 @@ window.__ModuleLoader__.load({
               { className: "aapr-view-head" },
               h("h3", { className: "aapr-view-title" }, "审批审计（本会话）"),
               enabled === true
-                ? h("span", { className: "aapr-state-on" }, "● Agent 审批已开启")
+                ? h("span", { className: "aapr-state-on" }, "● 自动审批/自动审查已开启")
                 : enabled === false
-                  ? h("span", { className: "aapr-state-off" }, "○ Agent 审批未开启")
+                  ? h("span", { className: "aapr-state-off" }, "○ 自动审批/自动审查未开启")
                   : null,
               h(ui.Button, { variant: "ghost", size: "sm", onClick: () => setTick(tick + 1) }, "刷新"),
               note !== "" ? h("span", { className: "aapr-muted" }, note) : null,
@@ -957,7 +1181,12 @@ window.__ModuleLoader__.load({
                             "tr",
                             { key: String(r.at) + "-" + String(i) },
                             h("td", null, fmtTime(r.at)),
-                            h("td", null, String(r.toolName)),
+                            h(
+                              "td",
+                              null,
+                              String(r.toolName),
+                              r.mode === "review" ? h("span", { className: "aapr-mode-review" }, "逐调用") : null,
+                            ),
                             h("td", { className: r.outcome === "allowed-once" ? "aapr-ok" : "aapr-no" }, OUTCOME_LABEL[r.outcome] || String(r.outcome)),
                             h("td", null, RISK_LABEL[r.riskLevel] || String(r.riskLevel || "-")),
                             h("td", null, String(r.model)),
