@@ -200,6 +200,12 @@ window.__ModuleLoader__.load({
         //    with no glyph the icon span is absent, leaving label + chevron.
         //    Skip menu rows (handled above) and the settings dialog (its nav
         //    row carries the same label but is owned by the settings-nav icon).
+        //    The trigger renders whichever preset is CURRENTLY selected, so it
+        //    must accept BOTH of our preset names (v1.8.2): 自动审批 and 自动审查
+        //    are equally ours, and neither is in the host's permissionGlyphs —
+        //    registerReviewMenuItem only marks menu rows, so without this the
+        //    trigger showed 自动审查 with no icon at all.
+        const triggerLabels = [currentLabel, String(REVIEW_LABEL).trim()];
         const buttons = document.querySelectorAll("button");
         for (let i = 0; i < buttons.length; i++) {
           const button = buttons[i];
@@ -212,7 +218,7 @@ window.__ModuleLoader__.load({
             const s = spans[j].textContent ? spans[j].textContent.trim() : "";
             if (s.length > 0) { labelText = s; break; }
           }
-          const matches = labelText === currentLabel && button.querySelector("svg") !== null;
+          const matches = triggerLabels.indexOf(labelText) !== -1 && button.querySelector("svg") !== null;
           if (matches) button.setAttribute(PERM_TRIGGER_MARKER, "");
           else button.removeAttribute(PERM_TRIGGER_MARKER);
         }
