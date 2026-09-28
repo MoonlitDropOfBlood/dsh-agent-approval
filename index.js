@@ -948,19 +948,28 @@ export class AgentApprovalService extends TypertRemoteService {
   /**
    * Resolve the audit sidecar for one session: `agent-approval.jsonl` inside
    * the session's persistence directory (same directory as the session's own
-   * durable log, via `sessionPersistence.locate(header)` — a pure path
-   * resolution that also works for live sessions). Falls back to a
-   * plugin-owned per-session file under DSH_HOME when the seam or the
-   * location is unavailable; the fallback keeps restart-safety at the cost
-   * of not being cleaned up when the session is deleted.
+   * durable log — a pure path resolution that also works for live sessions).
+   * DSH ≤0.1.7 exposes it as `sessionPersistence.locate(header)`; DSH 0.2.0
+   * dropped `locate` and moved resolution to the JSONL backend's async
+   * `resolveCurrentLog(id)` (returns the log path, or undefined while only a
+   * historical generation exists). Falls back to a plugin-owned per-session
+   * file under DSH_HOME when the seam or the location is unavailable; the
+   * fallback keeps restart-safety at the cost of not being cleaned up when the
+   * session is deleted.
    */
   async _recordsFileOf(session) {
     const persistence = this.ctx.get("sessionPersistence");
-    if (persistence !== undefined && typeof persistence.locate === "function") {
+    if (persistence !== undefined) {
       try {
-        const loc = persistence.locate(session.header);
-        if (loc && typeof loc.path === "string" && loc.path !== "") {
-          return join(dirname(loc.path), RECORDS_SIDECAR);
+        let path;
+        if (typeof persistence.locate === "function") {
+          const loc = persistence.locate(session.header);
+          if (loc && typeof loc.path === "string") path = loc.path;
+        } else if (typeof persistence.resolveCurrentLog === "function") {
+          path = await persistence.resolveCurrentLog(session.id);
+        }
+        if (typeof path === "string" && path !== "") {
+          return join(dirname(path), RECORDS_SIDECAR);
         }
       } catch (e) {
         /* fall through to the plugin-owned fallback */
