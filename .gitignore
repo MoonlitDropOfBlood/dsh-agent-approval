@@ -16,3 +16,4 @@ Thumbs.db
 
 # Local scratch
 *.log
+.acl-report/

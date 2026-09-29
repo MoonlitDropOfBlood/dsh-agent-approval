@@ -61,9 +61,9 @@
 
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import { Service } from "@deepseek-ai/cordis";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 // ---- constants --------------------------------------------------------------
 
@@ -166,13 +166,28 @@ const JEV_QUESTIONS = {
 /**
  * v1.8.0: the per-call review mode (`agent-review` preset). The SAME policy
  * criteria as `JEV_QUESTIONS` — only the decision instruction wording adapts
- * from "escalation request" to the pending tool call.
+ * from "escalation request" to the pending tool call. v1.9.0 adds guidance
+ * for the `effectiveCode` state field (the actual interpreter scripts the
+ * call would run): judge the code when present; reduced visibility alone is
+ * never a rejection reason (误杀治理 holds); and a source-edit diff that
+ * merely mentions destructive or security operations is not dangerous
+ * itself — the live false kill that motivated this sentence: Jev rejected
+ * THIS plugin's own criteria-text edit (risk=high 0.87) on 2026-09-29
+ * because the diff contained the phrases below.
  */
 const JEV_REVIEW_QUESTIONS = {
   ...JEV_QUESTIONS,
   decision: {
     ...JEV_QUESTIONS.decision,
     instructions: "Should this pending tool call be allowed to execute?",
+    criteria: {
+      approve:
+        JEV_QUESTIONS.decision.criteria.approve +
+        " The state's `effectiveCode` field carries the actual content of the interpreter scripts (node/python/bash/PowerShell files) this call would execute — when present, judge THAT code, not just the command line: a plainly safe, task-scoped script stays approved even if its command line alone looks opaque. When the pending call edits source files, judge what the change does to the file and whether it fits the task: diff text that merely mentions destructive or security operations (tests, security policy, incident reports, documentation) does not make the change dangerous.",
+      reject:
+        JEV_QUESTIONS.decision.criteria.reject +
+        " When `effectiveCode` is present, judge by that code: a script whose code deletes or modifies data outside the workspace, exfiltrates secrets, or hides obfuscated payloads is rejected for what its code shows. A referenced script that is unreadable, outside the workspace, oversized, or not decodable reduces your visibility — weigh that in concreteRisk, but never reject for reduced visibility alone: an ordinary script you simply have not seen is not, by itself, a risk.",
+    },
   },
 };
 
@@ -196,6 +211,222 @@ const RUN_CODE_TOOL = "run_code";
 /** Structured error identity shown on a final review denial tool card. */
 const REVIEW_DENIED_NAME = "AgentReviewDeniedError";
 const REVIEW_DENIED_CODE = "AGENT_REVIEW_DENIED";
+
+/**
+ * v1.9.0 — per-call review (REVIEW MODE ONLY): effective-code expansion.
+ *
+ * The review judge otherwise sees a command line like `node scripts/x.js`
+ * and nothing about what that script does — the classic blind spot through
+ * which an agent-authored temp script once wiped ~/.dsh (2026-09 incident).
+ * Before judging, the plugin extracts the script files the command would
+ * execute and includes their contents in the Jev state's `effectiveCode`
+ * field, so the judge rules on the code itself.
+ *
+ * Scope (user ruling 2026-09-29): interpreter scripts only (node / python /
+ * bash / PowerShell and friends); packaged CLIs (`npm run`, `npx`, `git`, …)
+ * are deliberately NOT expanded. The escalation (自动审批) path is untouched —
+ * `_jevStateOf` is not modified. Reads are workspace-confined (paths that
+ * resolve — including through symlinks — outside the session workspace are
+ * noted, never read: the expansion must not become an exfiltration channel),
+ * capped, and fully best-effort: every fault degrades to a note inside the
+ * field and never blocks judging.
+ */
+const REVIEW_CODE_MAX_FILES = 4;
+const REVIEW_CODE_FILE_CHARS = 8192;
+const REVIEW_CODE_TOTAL_CHARS = 10000;
+const REVIEW_CODE_MAX_FILE_BYTES = 262144;
+const REVIEW_CODE_MAX_COMMANDS = 6;
+
+/** File extensions treated as "an interpreter script the agent may have written". */
+const REVIEW_CODE_SCRIPT_EXTENSIONS = [
+  ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts",
+  ".py", ".pyw", ".sh", ".bash", ".ps1", ".psm1", ".rb", ".pl",
+];
+
+/** Interpreters whose positional argument (or `-File` value) is a script file. */
+const REVIEW_CODE_INTERPRETERS = new Set([
+  "node", "node.exe", "nodejs", "bun", "bun.exe", "deno", "deno.exe",
+  "python", "python.exe", "python3", "python3.exe", "py", "py.exe",
+  "bash", "bash.exe", "sh", "sh.exe", "zsh", "dash",
+  "pwsh", "pwsh.exe", "powershell", "powershell.exe",
+]);
+
+/** Strip wrapping quotes/braces a tokenizer may have left on a token. */
+function reviewCodeCleanToken(token) {
+  return String(token).replace(/^["'{(]+/, "").replace(/["'}),;]+$/, "");
+}
+
+/** True when the token names a file with a known interpreter-script extension. */
+function reviewCodeIsScriptFile(token) {
+  const t = reviewCodeCleanToken(token).toLowerCase();
+  for (const ext of REVIEW_CODE_SCRIPT_EXTENSIONS) {
+    if (t.endsWith(ext)) return true;
+  }
+  return false;
+}
+
+/**
+ * Split one shell command into top-level segments on `; | &` and newlines,
+ * respecting both quote styles and PowerShell brace blocks, so code embedded
+ * in `-Command "…"` / `-e "…"` stays one segment.
+ */
+function reviewCodeSplitSegments(command) {
+  const parts = [];
+  let cur = "";
+  let quote = null;
+  let depth = 0;
+  for (const ch of String(command)) {
+    if (quote !== null) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    if (ch === "}") depth = Math.max(0, depth - 1);
+    if (depth === 0 && (ch === ";" || ch === "|" || ch === "&" || ch === "\n" || ch === "\r")) {
+      parts.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts.map((s) => s.trim()).filter((s) => s !== "");
+}
+
+/** Whitespace tokenizer that keeps quoted runs (quotes attached) as one token. */
+function reviewCodeTokens(segment) {
+  const tokens = [];
+  let cur = "";
+  let quote = null;
+  let has = false;
+  for (const ch of String(segment)) {
+    if (quote !== null) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      has = true;
+      cur += ch;
+      continue;
+    }
+    if (ch === " " || ch === "\t") {
+      if (has) tokens.push(cur);
+      cur = "";
+      has = false;
+      continue;
+    }
+    cur += ch;
+    has = true;
+  }
+  if (has) tokens.push(cur);
+  return tokens;
+}
+
+/**
+ * Extract script references from ONE command segment:
+ *   - `{kind:"file", path}`    — a script file the command would execute;
+ *   - `{kind:"inline"}`        — an inline-code flag (`-e`/`-c`/`-Command`…);
+ *     that code is already visible verbatim in the tool arguments;
+ *   - `{kind:"encoded", data}` — a `-EncodedCommand`/`-enc` payload;
+ *   - `{kind:"note", text}`    — anything unrecognizable worth surfacing.
+ * Depth-limited recursion expands code nested inside inline flags
+ * (`pwsh -Command "node x.js"`, `bash -c "python x.py"`).
+ */
+function reviewCodeSegmentRefs(segment, depth) {
+  const tokens = reviewCodeTokens(segment);
+  let i = 0;
+  while (
+    i < tokens.length &&
+    (tokens[i] === "&" || tokens[i] === "." || tokens[i] === "call" ||
+      tokens[i] === "source" || tokens[i] === "sudo" || tokens[i] === "exec")
+  ) {
+    i += 1;
+  }
+  if (i >= tokens.length) return [];
+  const head = tokens[i].replace(/^.*[\\/]/, "").toLowerCase();
+  const refs = [];
+  if (!REVIEW_CODE_INTERPRETERS.has(head)) {
+    // Not an interpreter head: only a leading token that is itself a script
+    // file counts (call operators stripped above). No mid-segment scanning,
+    // so `git diff -- foo.py` never pulls foo.py into the state. Multi-word
+    // leftovers (a quoted chunk that reached this branch) are never taken
+    // as a path.
+    const lead = tokens[i];
+    if (reviewCodeIsScriptFile(lead) && !/\s/.test(reviewCodeCleanToken(lead))) {
+      refs.push({ kind: "file", path: reviewCodeCleanToken(lead) });
+    }
+    return refs;
+  }
+  let scriptFile = null;
+  let inline = false;
+  let module = false;
+  let j = i + 1;
+  while (j < tokens.length) {
+    const t = tokens[j];
+    const low = t.toLowerCase();
+    if (low === "-file") {
+      if (j + 1 < tokens.length && scriptFile === null) scriptFile = reviewCodeCleanToken(tokens[j + 1]);
+      j += 2;
+      continue;
+    }
+    if (low === "-m") {
+      // `python -m pkg` runs an installed module — packaged scope, not an
+      // agent-authored script (same exclusion as CLIs).
+      module = true;
+      j += 1;
+      continue;
+    }
+    if (low.startsWith("-enc")) {
+      if (j + 1 < tokens.length) refs.push({ kind: "encoded", data: tokens[j + 1] });
+      j += 2;
+      continue;
+    }
+    if (low === "-e" || low === "-c" || low === "-p" || low === "--print" || low.startsWith("-com") || low.startsWith("--eval")) {
+      inline = true;
+      if (depth < 2) {
+        // Recurse into the remaining tokens as one command string; strip the
+        // wrapping quotes first so the inner tokenization sees clean words
+        // (`pwsh -Command "node build.js"` → inner `node` + `build.js`).
+        const rest = tokens.slice(j + 1).join(" ").replace(/^["']+/, "").replace(/["']+$/, "");
+        if (rest.trim() !== "") {
+          for (const seg of reviewCodeSplitSegments(rest)) {
+            for (const inner of reviewCodeSegmentRefs(seg, depth + 1)) refs.push(inner);
+          }
+        }
+      }
+      break; // everything after an inline flag is code, not more flags/files
+    }
+    if (t.startsWith("-")) {
+      j += 1;
+      continue;
+    }
+    if (scriptFile === null && reviewCodeIsScriptFile(t)) scriptFile = reviewCodeCleanToken(t);
+    j += 1;
+  }
+  if (scriptFile !== null) refs.unshift({ kind: "file", path: scriptFile });
+  if (inline) refs.push({ kind: "inline" });
+  if (scriptFile === null && !inline && !module && refs.length === 0) {
+    refs.push({ kind: "note", text: head + " invoked, but no script file or inline-code flag was recognizable" });
+  }
+  return refs;
+}
+
+/** Extract all refs across every top-level segment of one command string. */
+export function reviewCodeRefsOf(command) {
+  const refs = [];
+  for (const seg of reviewCodeSplitSegments(command)) {
+    for (const ref of reviewCodeSegmentRefs(seg, 0)) refs.push(ref);
+  }
+  return refs;
+}
 
 /** Constrained to the
  * JSON-Schema subset `assertObjectJsonSchema` enforces for subagent outputs
@@ -2212,6 +2443,136 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
+   * v1.9.0: build the `effectiveCode` review-state field — the actual
+   * contents of the interpreter scripts one pending call would execute —
+   * plus a one-line visibility note for the audit rationale. The judge
+   * state stays workspace-scoped: file contents are only ever included for
+   * paths that resolve (symlinks followed and re-checked) inside the
+   * session workspace, so the expansion never ships beyond-boundary file
+   * contents anywhere. Capped, and fully best-effort: every fault degrades
+   * to a note inside the field and never blocks judging.
+   */
+  async _reviewEffectiveCode(session, argsRaw) {
+    let args;
+    try {
+      args = typeof argsRaw === "string" ? JSON.parse(argsRaw) : undefined;
+    } catch (e) {
+      args = undefined;
+    }
+    let cwd = "";
+    try {
+      if (session.header && typeof session.header.cwd === "string") cwd = session.header.cwd;
+    } catch (e) {
+      /* header access is best-effort */
+    }
+    let baseDir = cwd;
+    if (
+      args && typeof args === "object" && !Array.isArray(args) &&
+      typeof args.workdir === "string" && args.workdir.trim() !== ""
+    ) {
+      baseDir = args.workdir;
+    }
+    const commands = [];
+    const pushCommand = (v) => {
+      if (typeof v === "string" && v.trim() !== "" && commands.length < REVIEW_CODE_MAX_COMMANDS) commands.push(v);
+    };
+    if (typeof args === "string") pushCommand(args);
+    else if (args && typeof args === "object") {
+      for (const v of Object.values(args)) pushCommand(v);
+    }
+
+    const files = [];
+    let inlineCount = 0;
+    let encodedCount = 0;
+    const notes = [];
+    for (const command of commands) {
+      for (const ref of reviewCodeRefsOf(command)) {
+        if (ref.kind === "file") {
+          const dup = files.some((f) => f.toLowerCase() === ref.path.toLowerCase());
+          if (!dup && files.length < REVIEW_CODE_MAX_FILES) files.push(ref.path);
+        } else if (ref.kind === "inline") inlineCount += 1;
+        else if (ref.kind === "encoded") encodedCount += 1;
+        else if (ref.kind === "note") notes.push(ref.text);
+      }
+    }
+
+    const lines = [];
+    let filesRead = 0;
+    let filesSkipped = 0;
+    let filesMissing = 0;
+    let charsIncluded = 0;
+    const baseAbs = baseDir.trim() !== "" ? resolve(baseDir) : "";
+    const insideOf = (p) =>
+      baseAbs !== "" &&
+      (p.toLowerCase() === baseAbs.toLowerCase() || p.toLowerCase().startsWith(baseAbs.toLowerCase() + sep));
+    for (const raw of files) {
+      let resolved;
+      try {
+        resolved = resolve(baseAbs !== "" ? baseAbs : ".", raw);
+      } catch (e) {
+        filesMissing += 1;
+        continue;
+      }
+      if (!insideOf(resolved)) {
+        filesSkipped += 1;
+        lines.push("[script] " + raw + " — path resolves beyond the workspace boundary; skipped, contents never included");
+        continue;
+      }
+      let real = resolved;
+      try {
+        real = await realpath(resolved);
+        if (!insideOf(real)) {
+          filesSkipped += 1;
+          lines.push("[script] " + raw + " — symlink target lies beyond the workspace boundary; skipped, contents never included");
+          continue;
+        }
+      } catch (e) {
+        filesMissing += 1;
+        lines.push("[script] " + raw + " — not found on disk at review time");
+        continue;
+      }
+      try {
+        const st = await stat(real);
+        if (!st.isFile() || st.size > REVIEW_CODE_MAX_FILE_BYTES) {
+          filesSkipped += 1;
+          lines.push(
+            "[script] " + raw + " — " +
+              (st.isFile() ? "too large to review (" + st.size + " bytes)" : "not a regular file"),
+          );
+          continue;
+        }
+        let text = await readFile(real, "utf8");
+        const total = text.length;
+        if (total > REVIEW_CODE_FILE_CHARS) {
+          text = text.slice(0, REVIEW_CODE_FILE_CHARS) + "\n…[truncated, " + (total - REVIEW_CODE_FILE_CHARS) + " more chars]";
+        }
+        filesRead += 1;
+        charsIncluded += Math.min(total, REVIEW_CODE_FILE_CHARS);
+        lines.push("[script " + filesRead + "] " + raw + " → " + real + " (" + st.size + " bytes)\n" + text);
+      } catch (e) {
+        filesMissing += 1;
+        lines.push("[script] " + raw + " — not readable at review time: " + errText(e));
+      }
+    }
+    if (encodedCount > 0) {
+      lines.push("[-EncodedCommand] " + encodedCount + " base64-encoded invocation(s) present — the payload is not verifiable as readable code");
+    }
+    if (inlineCount > 0) {
+      lines.push("[inline] " + inlineCount + " inline-code invocation(s) — that code is embedded verbatim in the command text / toolArguments");
+    }
+    if (notes.length > 0) lines.push("[note] " + notes.join("; "));
+    if (lines.length === 0) {
+      return { text: "(no interpreter script file is referenced by this call)", note: "no script files referenced" };
+    }
+    const note =
+      "code: " + filesRead + " script file(s)" +
+      (charsIncluded > 0 ? ", ~" + Math.round(charsIncluded / 1024) + " KB included" : "") +
+      (filesSkipped > 0 ? ", " + filesSkipped + " skipped (beyond workspace / oversized)" : "") +
+      (filesMissing > 0 ? ", " + filesMissing + " missing/unreadable" : "");
+    return { text: trunc(lines.join("\n\n"), REVIEW_CODE_TOTAL_CHARS), note: note };
+  }
+
+  /**
    * Judge one pending call through the Jev HTTP API (the review-mode judge).
    * Mirrors `_judgeWithJev`'s fail-closed contract exactly — same `_jevParse`
    * standard, same confidence gate — but every outcome is FINAL: rejections,
@@ -2242,8 +2603,14 @@ export class AgentApprovalService extends TypertRemoteService {
     }
 
     let winner;
+    let codeInfo = { text: "(not evaluated)", note: "" };
     try {
-      const state = this._reviewStateOf(session, exec, argsRaw);
+      try {
+        codeInfo = await this._reviewEffectiveCode(session, argsRaw);
+      } catch (e) {
+        codeInfo = { text: "(expansion fault: " + errText(e) + ")", note: "code expansion fault" };
+      }
+      const state = { ...this._reviewStateOf(session, exec, argsRaw), effectiveCode: codeInfo.text };
       winner = await Promise.race([
         this._jevRequest(cfg, state, controller.signal, JEV_REVIEW_QUESTIONS)
           .then((body) => ({ kind: "result", body: body }))
@@ -2310,7 +2677,7 @@ export class AgentApprovalService extends TypertRemoteService {
         outcome: approved ? "allowed-once" : "rejected",
         riskLevel: parsed.riskLevel,
         model: label,
-        rationale: trunc(parsed.rationale, 600),
+        rationale: trunc(parsed.rationale + (codeInfo.note !== "" ? " [" + codeInfo.note + "]" : ""), 600),
       });
       if (approved) {
         if (trustKey !== undefined) {
