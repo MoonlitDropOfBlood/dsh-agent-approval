@@ -11,12 +11,16 @@
  *      session — restored with it after a restart, gone when the session is
  *      deleted. Rows offer the one-click「加白」rule shortcut.
  *
- *   2. A "自动审批" page in the Settings panel (`settings.section`):
- *      approval model picker (provider + model, the harness default, or the
- *      TypeSafe Jev direct HTTP backend with its API key / endpoint /
- *      confidence-gate settings), judge timeout setting (fail-closed), the
- *      list of sessions with the mode enabled (session-list title +
- *      workspace), and the allow/deny rule table.
+ *   2. A "自动审批" page in the Settings panel (`settings.section`). It
+ *      presents the two modes as SEPARATE blocks since v1.10.0:
+ *        - 自动审批: approval model picker (harness provider + model, or the
+ *          harness default), judge invocation mode (direct LLM vs isolated
+ *          subagent — an LLM either way, Jev is not selectable here), the
+ *          fail-closed timeout, enabled sessions and the allow/deny rules.
+ *        - 自动审查: the per-call review mode's own TypeSafe Jev settings
+ *          (API key / model / endpoint / confidence gate) plus the global
+ *          "new sessions enter 自动审查" switch. Configuring Jev here is what
+ *          enables the mode; the approval judge is untouched by it.
  *
  * Session-level on/off lives in the /permission menu (the "自动审批"
  * preset, registered by the package's cordis.patch.yml bundle patch) and the
@@ -551,8 +555,9 @@ window.__ModuleLoader__.load({
         const setReviewDefault = reviewDefaultSlot[1];
         const timeoutSlot = React.useState("");
         const setTimeoutDraft = timeoutSlot[1];
-        // Jev backend drafts (edited in the Jev card shown when the judge
-        // provider is the synthetic "typesafe" entry).
+        // Jev backend drafts — the 自动审查 card's own configuration, shown
+        // unconditionally since v1.10.0 (it no longer hangs off a judge
+        // provider selection).
         const jevKeySlot = React.useState("");
         const setJevKey = jevKeySlot[1];
         const jevEndpointSlot = React.useState("");
@@ -667,9 +672,19 @@ window.__ModuleLoader__.load({
           }
           remote
             .setJevConfig({ apiKey: jevKey, endpoint: jevEndpoint, model: jevModel, confidence: conf })
-            .then(() => {
+            .then((res) => {
+              const v = pick(res) || {};
+              setReviewGate(v.reviewAvailable === true);
+              setReviewDefault(v.reviewDefault === true);
               refresh();
-              setNote("Jev 配置已保存");
+              // Configuring Jev opens the review gate; the Host turns the
+              // per-call review default on at that exact moment (v1.10.0).
+              setNote(
+                v.reviewAvailable === true
+                  ? "Jev 配置已保存：自动审查已就绪" +
+                    (v.reviewDefault === true ? "，新开会话自动进入逐调用审查" : "")
+                  : "Jev 配置已保存，但 API Key 仍为空：自动审查保持关闭",
+              );
             })
             .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
         };
@@ -735,30 +750,22 @@ window.__ModuleLoader__.load({
             .catch(() => {});
         };
 
-        // The synthetic "typesafe" provider routes judging through the
-        // TypeSafe Jev HTTP API — it is not part of the harness directory.
+        // v1.10.0: the harness model directory is the WHOLE list — Jev is no
+        // longer a judge provider (it judges the per-call review mode only),
+        // so there is no synthetic "typesafe" entry to prepend.
         const providerOptions = [{ id: "", name: "默认（Harness 默认模型）" }].concat(
-          [{ id: "typesafe", name: "TypeSafe Jev（决策模型·直连 API）" }],
           dir ? dir.providers : [],
         );
-        const modelOptions =
-          provider === "typesafe"
-            ? [
-                { provider: "typesafe", id: "jev-latest", name: "jev-latest（跟随最新版本）" },
-                { provider: "typesafe", id: "jev-1.13.0", name: "jev-1.13.0（锁定版本）" },
-              ]
-            : [{ provider: "", id: "", name: "默认（Harness 默认模型）" }].concat(
-                dir && dir.models ? dir.models.filter((m) => m.provider === provider) : [],
-              );
+        const modelOptions = [{ provider: "", id: "", name: "默认（Harness 默认模型）" }].concat(
+          dir && dir.models ? dir.models.filter((m) => m.provider === provider) : [],
+        );
         const defaultHint =
-          provider === "typesafe"
-            ? "当前审批判定直连 TypeSafe Jev API，不经过 Harness 模型路由；下方 Jev 配置在该模式下生效。"
-            : dir && dir.defaultSelection
-              ? "未配置时使用 Harness 默认模型；当前默认路由：" +
-                dir.defaultSelection.provider +
-                " / " +
-                dir.defaultSelection.model
-              : "未配置时使用 Harness 默认模型路由";
+          dir && dir.defaultSelection
+            ? "未配置时使用 Harness 默认模型；当前默认路由：" +
+              dir.defaultSelection.provider +
+              " / " +
+              dir.defaultSelection.model
+            : "未配置时使用 Harness 默认模型路由";
 
         return h(
           "div",
@@ -766,13 +773,17 @@ window.__ModuleLoader__.load({
           h(
             "div",
             { className: "aapr-card" },
-            h("h3", null, "自动审批权限"),
+            h("h3", null, "自动审批与自动审查"),
             h(
               "div",
               { className: "aapr-muted" },
-              "一种新的权限模式：以 workspace-write 为基线沙箱；当工具请求提权（更宽的沙箱）时，由一个独立的审批 Agent 评估风险——安全、可逆、与任务相符的操作自动批准，破坏性、不可逆、越界或理由不符的操作直接拒绝。",
+              "两种互相独立的权限模式。",
               h("br", null),
-              "在输入框 /permission 菜单选择「自动审批」预设，或执行命令 /agent-approval on|off 为会话开启；每个会话的审批审计记录在该会话窗口顶部的「审批」标签页（轨迹旁），随会话保存。",
+              "① 自动审批：workspace-write 基线；工具请求提权时由 LLM 审批 Agent 自动裁决（v1.10.0 起判定模型只能是 LLM）。在输入框 /permission 菜单选择「自动审批」预设，或执行 /agent-approval on|off 为会话开启。",
+              h("br", null),
+              "② 自动审查：danger-full-access 基线；每个工具调用执行前经 TypeSafe Jev 判定一次（见下方独立卡片）。在 /permission 菜单选择「自动审查」预设，或执行 /agent-review on|off。",
+              h("br", null),
+              "每个会话的审批审计记录在该会话窗口顶部的「审批」标签页（轨迹旁），随会话保存。",
             ),
             note !== "" ? h("div", { className: "aapr-muted" }, note) : null,
           ),
@@ -794,7 +805,7 @@ window.__ModuleLoader__.load({
                     value: provider,
                     onChange: (e) => {
                       setProvider(e.target.value);
-                      setModel(e.target.value === "typesafe" ? "jev-latest" : "");
+                      setModel("");
                     },
                   },
                   providerOptions.map((p) =>
@@ -812,7 +823,7 @@ window.__ModuleLoader__.load({
                     className: "aapr-select",
                     value: model,
                     onChange: (e) => setModel(e.target.value),
-                    disabled: dir === null && provider !== "typesafe",
+                    disabled: dir === null,
                   },
                   modelOptions.map((m) =>
                     h("option", { key: m.provider + "/" + m.id, value: m.id }, m.id === "" ? m.name : m.name + "（" + m.id + "）"),
@@ -822,144 +833,33 @@ window.__ModuleLoader__.load({
               h(ui.Button, { variant: "primary", size: "sm", onClick: saveModel }, "保存"),
             ),
             h("div", { className: "aapr-muted" }, defaultHint),
-            provider !== "typesafe"
-              ? h(
-                  "div",
-                  { className: "aapr-row" },
-                  h(
-                    "label",
-                    null,
-                    "裁决方式：",
-                    h(
-                      "select",
-                      {
-                        className: "aapr-select",
-                        value: judgeMode,
-                        onChange: (e) => saveJudgeMode(e.target.value),
-                      },
-                      h("option", { value: "llm" }, "LLM 直连（默认，不创建子会话）"),
-                      h("option", { value: "subagent" }, "隔离子代理（legacy，创建审批子会话）"),
-                    ),
-                  ),
-                )
-              : null,
-            provider !== "typesafe"
-              ? h(
-                  "div",
-                  { className: "aapr-muted" },
-                  "LLM 直连与隔离子代理是同一套审批人格、提示词与裁决格式（{decision, riskLevel, rationale}），仅调用方式不同：前者一次直连模型调用完成裁决、不启动审批子代理（零上下文污染）；后者每次裁决创建一个独立子会话（v1.8.0 前的唯一行为）。TypeSafe Jev 后端不受此设置影响。",
-                )
-              : null,
+            h(
+              "div",
+              { className: "aapr-row" },
+              h(
+                "label",
+                null,
+                "裁决方式：",
+                h(
+                  "select",
+                  {
+                    className: "aapr-select",
+                    value: judgeMode,
+                    onChange: (e) => saveJudgeMode(e.target.value),
+                  },
+                  h("option", { value: "llm" }, "LLM 直连（默认，不创建子会话）"),
+                  h("option", { value: "subagent" }, "隔离子代理（legacy，创建审批子会话）"),
+                ),
+              ),
+            ),
+            h(
+              "div",
+              { className: "aapr-muted" },
+              "LLM 直连与隔离子代理是同一套审批人格、提示词与裁决格式（{decision, riskLevel, rationale}），仅调用方式不同：前者一次直连模型调用完成裁决、不启动审批子代理（零上下文污染）；后者每次裁决创建一个独立子会话（v1.8.0 前的唯一行为）。",
+              h("br", null),
+              "自动审批的判定模型只能是 LLM：TypeSafe Jev 的结构化决策在此处不可选（它的风险判断比 LLM 弱，而这里正是人工审批原本要守住的路径）。Jev 只用于下方的「自动审查」模式，两者互不影响。",
+            ),
           ),
-          provider === "typesafe"
-            ? h(
-                "div",
-                { className: "aapr-card" },
-                h("h3", null, "TypeSafe Jev 配置"),
-                h(
-                  "div",
-                  { className: "aapr-muted" },
-                  "Jev 是结构化决策模型（System One）：审批时直连 TypeSafe API，不创建审批子会话，毫秒级返回带校准概率的裁决。审计「理由」由概率分布合成（Jev 本身不生成文字）；置信度低于阈值时按 fail-closed 处理（记 unavailable，不批准也不记拒绝）。对中文任务上下文的准确率略低于英语。API Key 明文保存在本机 config.json；留空时使用环境变量 TYPESAFE_API_KEY。",
-                ),
-                h(
-                  "div",
-                  { className: "aapr-row" },
-                  h(
-                    "label",
-                    null,
-                    "API Key：",
-                    h("input", {
-                      className: "aapr-input",
-                      type: "password",
-                      placeholder: "TYPESAFE_API_KEY",
-                      value: jevKey,
-                      onChange: (e) => setJevKey(e.target.value),
-                    }),
-                  ),
-                  h(
-                    "label",
-                    null,
-                    "模型：",
-                    h("input", {
-                      className: "aapr-input",
-                      placeholder: "jev-latest",
-                      value: jevModel,
-                      onChange: (e) => setJevModel(e.target.value),
-                    }),
-                  ),
-                ),
-                h(
-                  "div",
-                  { className: "aapr-row" },
-                  h(
-                    "label",
-                    null,
-                    "Endpoint：",
-                    h("input", {
-                      className: "aapr-input aapr-input-wide",
-                      placeholder: "https://api.typesafe.ai/v1/systemone",
-                      value: jevEndpoint,
-                      onChange: (e) => setJevEndpoint(e.target.value),
-                    }),
-                  ),
-                  h(
-                    "label",
-                    null,
-                    "置信度阈值：",
-                    h("input", {
-                      className: "aapr-input",
-                      type: "number",
-                      step: "0.05",
-                      min: "0.01",
-                      max: "0.99",
-                      value: jevConf,
-                      onChange: (e) => setJevConf(e.target.value),
-                    }),
-                  ),
-                  h(ui.Button, { variant: "primary", size: "sm", onClick: saveJev }, "保存"),
-                ),
-              )
-            : null,
-          provider === "typesafe"
-            ? h(
-                "div",
-                { className: "aapr-card" },
-                h("h3", null, "自动审查（逐调用审查）"),
-                h(
-                  "div",
-                  { className: "aapr-row" },
-                  h(
-                    "label",
-                    null,
-                    "逐调用审查：",
-                    h(
-                      "select",
-                      {
-                        className: "aapr-select",
-                        value: reviewDefault ? "on" : "off",
-                        disabled: state !== null && state.reviewAvailable !== true,
-                        onChange: (e) => saveReviewDefault(e.target.value === "on"),
-                      },
-                      h("option", { value: "on" }, "开（新会话自动审查每个工具调用）"),
-                      h("option", { value: "off" }, "关（新会话按默认预设）"),
-                    ),
-                  ),
-                ),
-                h(
-                  "div",
-                  { className: "aapr-muted" },
-                  "开启后，新开会话自动进入自动审查：以 danger-full-access 为基线，每个工具调用（含 PTC 内层调用，外层 run_code 传输除外）执行前经 Jev 判定一次——风险调用直接拒绝、body 不执行、不转人工（fail-closed，拒绝即最终结论）。规则表与会话内信任缓存先行短路降噪；命中拒绝规则、Jev 判拒、低置信、超时、网络故障一律拒绝该调用（工具卡片显示 AGENT_REVIEW_DENIED 详情与风险理由）。",
-                  h("br", null),
-                  "已存在的会话不受此开关影响，可用 /permission 菜单「自动审查」或 /agent-review on|off 单独切换。审计逐调用记录在「审批」标签页（工具列标注「逐调用」）。",
-                  h("br", null),
-                  state === null
-                    ? "状态加载中…"
-                    : state.reviewAvailable === true
-                      ? "当前状态：Jev 判定可用。"
-                      : "当前状态：Jev 判定不可用（缺 API Key），开关已禁用，新会话不会自动审查。",
-                ),
-              )
-            : null,
           h(
             "div",
             { className: "aapr-card" },
@@ -975,6 +875,110 @@ window.__ModuleLoader__.load({
               }),
               h("span", { className: "aapr-muted" }, "毫秒（30000–600000，超时按拒绝处理，fail-closed）"),
               h(ui.Button, { variant: "primary", size: "sm", onClick: saveTimeout }, "保存"),
+            ),
+          ),
+          h(
+            "div",
+            { className: "aapr-card" },
+            h("h3", null, "自动审查（逐调用审查）"),
+            h(
+              "div",
+              { className: "aapr-muted" },
+              "自动审查是独立的第二种权限模式，与上面的自动审批互不相关：它不看提权，而是以 danger-full-access 为基线，对每个工具调用（含 PTC 内层调用，外层 run_code 传输除外）在执行前用 TypeSafe Jev 判定一次——风险调用直接拒绝、body 不执行、不转人工（fail-closed，拒绝即最终结论）。",
+              h("br", null),
+              "Jev 是结构化决策模型（System One）：直连 TypeSafe API，不创建审批子会话，毫秒级返回带校准概率的裁决。审计「理由」由概率分布合成（Jev 本身不生成文字）；置信度低于阈值时按 fail-closed 处理（记 unavailable，不放行也不记拒绝）。对中文任务上下文的准确率略低于英语。API Key 明文保存在本机 config.json；留空时使用环境变量 TYPESAFE_API_KEY。",
+              h("br", null),
+              "保存一个可用的 API Key 即完成配置，自动审查随之启用（新开会话自动进入）；下面同一张卡片可以随时关掉它。",
+            ),
+            h(
+              "div",
+              { className: "aapr-row" },
+              h(
+                "label",
+                null,
+                "逐调用审查：",
+                h(
+                  "select",
+                  {
+                    className: "aapr-select",
+                    value: reviewDefault ? "on" : "off",
+                    disabled: state !== null && state.reviewAvailable !== true,
+                    onChange: (e) => saveReviewDefault(e.target.value === "on"),
+                  },
+                  h("option", { value: "on" }, "开（新会话自动审查每个工具调用）"),
+                  h("option", { value: "off" }, "关（新会话按默认预设）"),
+                ),
+              ),
+            ),
+            h(
+              "div",
+              { className: "aapr-row" },
+              h(
+                "label",
+                null,
+                "API Key：",
+                h("input", {
+                  className: "aapr-input",
+                  type: "password",
+                  placeholder: "TYPESAFE_API_KEY",
+                  value: jevKey,
+                  onChange: (e) => setJevKey(e.target.value),
+                }),
+              ),
+              h(
+                "label",
+                null,
+                "模型：",
+                h("input", {
+                  className: "aapr-input",
+                  placeholder: "jev-latest",
+                  value: jevModel,
+                  onChange: (e) => setJevModel(e.target.value),
+                }),
+              ),
+            ),
+            h(
+              "div",
+              { className: "aapr-row" },
+              h(
+                "label",
+                null,
+                "Endpoint：",
+                h("input", {
+                  className: "aapr-input aapr-input-wide",
+                  placeholder: "https://api.typesafe.ai/v1/systemone",
+                  value: jevEndpoint,
+                  onChange: (e) => setJevEndpoint(e.target.value),
+                }),
+              ),
+              h(
+                "label",
+                null,
+                "置信度阈值：",
+                h("input", {
+                  className: "aapr-input",
+                  type: "number",
+                  step: "0.05",
+                  min: "0.01",
+                  max: "0.99",
+                  value: jevConf,
+                  onChange: (e) => setJevConf(e.target.value),
+                }),
+              ),
+              h(ui.Button, { variant: "primary", size: "sm", onClick: saveJev }, "保存"),
+            ),
+            h(
+              "div",
+              { className: "aapr-muted" },
+              "规则表与会话内信任缓存先行短路降噪；命中拒绝规则、Jev 判拒、低置信、超时、网络故障一律拒绝该调用（工具卡片显示 AGENT_REVIEW_DENIED 详情与风险理由）。",
+              h("br", null),
+              "已存在的会话不受此开关影响，可用 /permission 菜单「自动审查」或 /agent-review on|off 单独切换。审计逐调用记录在「审批」标签页（工具列标注「逐调用」）。",
+              h("br", null),
+              state === null
+                ? "状态加载中…"
+                : state.reviewAvailable === true
+                  ? "当前状态：Jev 判定可用，自动审查已就绪。"
+                  : "当前状态：Jev 判定不可用（缺 API Key），开关已禁用，新会话不会自动审查。",
             ),
           ),
           h(

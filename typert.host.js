@@ -115,9 +115,17 @@ const setReviewDefaultValueSchema = z
   })
   .readonly();
 
+/**
+ * v1.10.0: the TypeSafe Jev backend belongs to the 自动审查 (per-call review)
+ * mode alone — it is NOT a judge provider. `setJevConfig` therefore reports
+ * the review gate and the (possibly auto-enabled) review default so the
+ * client can reflect "配置了 Jev 就启用自动审查" without a second round trip.
+ */
 const setJevValueSchema = z
   .object({
     jev: jevConfigSchema,
+    reviewAvailable: z.boolean(),
+    reviewDefault: z.boolean(),
   })
   .readonly();
 
@@ -557,17 +565,17 @@ export const TYPERT = {
             kind: "method",
             name: "setModel",
             signature: "@Remote('setModel') async setModel(request: AgentApprovalSetModelRequest): Promise<AgentApprovalSetModelResult>",
-            summary: "Set the judge model route (empty strings = inherit the requesting session's; provider 'typesafe' selects the Jev backend).",
+            summary: "Set the judge model route (empty strings = use the harness default model; the escalation judge is always an LLM).",
             jsDoc:
-              "/**\n * Set provider/model used by the approval judge; empty strings clear the override. The synthetic provider 'typesafe' routes judging through the TypeSafe Jev HTTP API instead of a harness subagent.\n * @param request - { provider, model }.\n * @returns the stored route.\n */",
+              "/**\n * Set provider/model used by the approval judge; empty strings clear the override (the judge then uses the harness default model). Since v1.10.0 Jev is not a judge provider — a legacy 'typesafe' selection clears the override.\n * @param request - { provider, model }.\n * @returns the stored route.\n */",
           },
           {
             kind: "method",
             name: "setJevConfig",
             signature: "@Remote('setJevConfig') async setJevConfig(request: AgentApprovalSetJevRequest): Promise<AgentApprovalSetJevResult>",
-            summary: "Set the TypeSafe Jev backend settings (API key, endpoint, model, confidence gate; persisted).",
+            summary: "Set the TypeSafe Jev backend settings of the 自动审查 mode (API key, endpoint, model, confidence gate; persisted; a resolvable key opens the review gate and enables 自动审查 for new sessions).",
             jsDoc:
-              "/**\n * Update the Jev backend settings used when the judge provider is 'typesafe'. Only provided fields change; confidence (the fail-closed gate) is clamped to [0.01, 0.99].\n * @param request - { apiKey, endpoint, model, confidence }.\n * @returns the stored Jev settings.\n */",
+              "/**\n * Update the Jev backend settings of the per-call review mode (independent of the approval judge). Only provided fields change; confidence (the fail-closed gate) is clamped to [0.01, 0.99]. Saving a resolvable API key opens the review gate and turns 自动审查 on for new sessions.\n * @param request - { apiKey, endpoint, model, confidence }.\n * @returns the stored Jev settings plus the review gate and the review default.\n */",
           },
           {
             kind: "method",
@@ -642,7 +650,7 @@ export const TYPERT = {
           {
             name: "AgentApprovalSetJevResult",
             declaration:
-              "export type AgentApprovalSetJevResult = { ok: true; value: { readonly jev: AgentApprovalJevConfig } } | { ok: false; error: { code: string; message?: string } };",
+              "export type AgentApprovalSetJevResult = { ok: true; value: { readonly jev: AgentApprovalJevConfig; readonly reviewAvailable: boolean; readonly reviewDefault: boolean } } | { ok: false; error: { code: string; message?: string } };",
           },
           {
             name: "AgentApprovalEnabledSession",

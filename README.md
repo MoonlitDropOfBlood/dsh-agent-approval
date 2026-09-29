@@ -23,11 +23,11 @@
 | 🛡 **权限菜单第四项** | `/permission` 菜单新增 **自动审批** 预设；选中即开启，切到其他预设自动关闭，跨重启保持 |
 | 🤖 新权限模式 | 开启后：沙箱基线固定 `workspace-write`，审批策略切到 `ask`（内部接管），**不再弹人工审批** |
 | 🤖 自动裁决（默认 LLM 直连） | 每次提权请求由**一次 LLM 直连调用**裁决（v1.8.0 起默认）：与子代理同一套审批人格 / 提示词 / 结构化裁决 `{decision, riskLevel, rationale}`，但**不创建审批子会话**（零上下文污染）；设置页可切回「隔离子代理」（一次性 `spawn` 子代理：独立会话、零工具、只读材料） |
-| 🕵️ 自动审查（逐调用，实验） | 可选预设（需先在设置页启用 Jev）：**Full access 基线**，每个工具调用（含 PTC 内层）执行前经 Jev 判定一次，风险调用**直接拒绝、body 不执行、不转人工**（fail-closed）；规则表与会话内信任先行短路降噪；`/agent-review on\|off` 或菜单「自动审查」开启。v1.9.0 起**有效代码展开**：命令引用的解释器脚本（node / python / bash / ps1）内容会被读出并放进裁决 state，agent 临时写的脚本按**实际代码**受审而不是只看命令行（仅读 workspace 内文件，越界只标注、永不读取） |
+| 🕵️ 自动审查（逐调用，实验） | 与自动审批**完全独立**的第二种模式（需先在设置页配置 Jev，配置即启用）：**Full access 基线**，每个工具调用（含 PTC 内层）执行前经 Jev 判定一次，风险调用**直接拒绝、body 不执行、不转人工**（fail-closed）；规则表与会话内信任先行短路降噪；`/agent-review on\|off` 或菜单「自动审查」开启。v1.9.0 起**有效代码展开**：命令引用的解释器脚本（node / python / bash / ps1）内容会被读出并放进裁决 state，agent 临时写的脚本按**实际代码**受审而不是只看命令行（仅读 workspace 内文件，越界只标注、永不读取） |
 | ⛔ 风险即拒绝 | 破坏性 / 不可逆 / 越界（含修改操作系统或其他应用数据）/ 理由与实际命令不符 → 直接 `reject`；仅"安全、可逆、与任务相符、理由诚实"才 `approve`——项目自身的安装/部署脚本写其文档指定路径属任务所需 |
 | 🔒 Fail-closed | 审批 Agent 启动失败、超时（可配 30s–600s）、结果不合法 → 一律按拒绝处理，绝不静默放行 |
-| ⚙️ 审批模型可配置 | 设置页选择 Provider + Model，不选则固定用 **Harness 默认模型**（不跟随请求会话，口径稳定）；选择与超时**持久保存**，重启不丢 |
-| ⚡ TypeSafe Jev 决策模型后端 | 审批模型可选 **TypeSafe Jev**（System One 结构化决策模型）：审批时直连其 API，用类型化问题（Choice/Noul）毫秒级返回带校准概率的裁决；置信度低于阈值按 fail-closed 处理，审计理由由概率合成（需在设置页填 API Key，或设 `TYPESAFE_API_KEY`） |
+| ⚙️ 审批模型可配置 | 设置页选择 Provider + Model（**只能是 LLM 路由**），不选则固定用 **Harness 默认模型**（不跟随请求会话，口径稳定）；选择与超时**持久保存**，重启不丢 |
+| ⚡ TypeSafe Jev 决策模型（仅自动审查） | Jev（System One 结构化决策模型）是**自动审查模式专属**的判定后端：设置页「自动审查」卡片独立配置（API Key / Endpoint / 模型 / 置信度阈值），直连其 API 用类型化问题（Choice/Noul）毫秒级返回带校准概率的裁决；置信度低于阈值按 fail-closed 处理，审计理由由概率合成（也可设 `TYPESAFE_API_KEY`）。**v1.10.0 起不再是自动审批的判定选项**——Jev 的风险判断弱于 LLM，而提权正是人工审批原本要守住的路径 |
 | 📋 审计记录（随会话） | 会话窗口顶部的**「审批」标签页**（轨迹旁）查看本会话全部审批：结论 / 风险等级 / 模型 / 耗时 / 理由；悬停看完整理由与**精确工具参数**；审批 Agent 的会话 id 可回溯完整推理；已批准行可一键**「加白」**存为放行规则。记录存在**会话存储目录内的独立文件**——随会话恢复，删除会话即随之删除 |
 | 🔁 可逆开关 | 权限菜单「自动审批」预设、`/agent-approval on\|off` 命令两条等价路径；关闭时**恢复开启前的权限旋钮** |
 
@@ -42,10 +42,9 @@
         └─ 本插件 prepend 抢占（先于人工弹窗 answerer）
               ├─ （默认）LLM 直连裁决（一次 stream 调用 · 同套人格/提示词/裁决格式 · 零子会话）
               ├─ （可选）spawn 审批 Agent（独立会话 · 零工具 · 结构化裁决 · 不会递归审批）
-              └─ （或）直连 TypeSafe Jev 决策模型（state + 类型化问题 → 概率化裁决 · 亚秒级）
-                    ├─ approve → allowed-once（该次放行）
-                    ├─ reject  → rejected（风险操作，最终拒绝）
-                    └─ 超时/故障/低置信/取消 → fail-closed（按拒绝处理）
+              │     ├─ approve → allowed-once（该次放行）
+              │     ├─ reject  → rejected（风险操作，最终拒绝）
+              │     └─ 超时/故障/低置信/取消 → fail-closed（按拒绝处理）
               └─ 记入审计（会话目录内的独立文件，「审批」标签页可见）
 ```
 
@@ -81,15 +80,15 @@ dsh plugin --profile web add https://github.com/MoonlitDropOfBlood/dsh-agent-app
 1. **开启**：在 `/permission` 菜单选 **自动审批**，或输入 `/agent-approval on`。
 2. **自动裁决**：之后该会话里的提权请求（例如命令被沙箱拒绝后带 `sandbox_permissions` 的重试）不再弹窗，由审批 Agent 在后台裁决并放行/拒绝。
 3. **审计**：会话窗口顶部的**「审批」标签页**（轨迹旁）查看本会话的审批记录；悬停"审批理由"看完整理由与工具参数；已批准行可「加白」存为放行规则。记录存在会话存储目录内的独立文件，删除会话即随之删除；v1.4 的旧全局记录用 `node scripts/migrate-records.mjs` 一次性迁移（`--dry-run` 预览）。
-4. **配置**：设置 → **自动审批** 设置审批模型（Harness 默认模型、指定 Provider/Model，或 **TypeSafe Jev**——选 Jev 后在下方卡片填 API Key 并按需调整 Endpoint / 模型版本 / 置信度阈值）、**裁决方式**（LLM 直连 / 隔离子代理）、审批超时与放行/拒绝规则。
-5. **自动审查（可选）**：设置页启用 Jev 后，`/permission` 菜单出现 **自动审查**（或执行 `/agent-review on`）——该会话切到 Full access 基线，**每个工具调用**执行前经 Jev 判定，风险调用直接拒绝（不转人工）；关闭恢复原旋钮。
+4. **配置自动审批**：设置 → **自动审批** 设置审批模型（Harness 默认模型或指定 Provider/Model——**只能是 LLM 路由**）、**裁决方式**（LLM 直连 / 隔离子代理）、审批超时与放行/拒绝规则。
+5. **配置自动审查（独立）**：设置页「自动审查」卡片填 Jev 的 API Key（可调 Endpoint / 模型版本 / 置信度阈值）——**保存即启用**逐调用审查（新开会话自动进入，菜单出现 **自动审查** 预设，或执行 `/agent-review on`）：该会话切到 Full access 基线，**每个工具调用**执行前经 Jev 判定，风险调用直接拒绝（不转人工）；关闭恢复原旋钮。
 6. **关闭**：菜单切回其他预设，或 `/agent-approval off`，恢复开启前的沙箱模式与审批策略。
 
 ## 目录结构
 
 ```
 dsh-agent-approval/
-├── index.js            # Host 半：AgentApprovalService（审批瀑布抢占 + LLM 直连/子代理/Jev 裁决 + 逐调用审查 + 审计）
+├── index.js            # Host 半：AgentApprovalService（审批瀑布抢占 + LLM 直连/子代理裁决 + Jev 逐调用审查 + 审计）
 ├── client.js           # Client 半：设置页「自动审批」+ 会话「审批」审计标签页 bundle
 ├── typert.host.js      # Typert Host manifest（agentApproval 10 个 Remote 方法的描述）
 ├── cordis.patch.yml      # dsh bundle patch（挂载行 + permission 预设表覆盖）
