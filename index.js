@@ -593,7 +593,6 @@ export class AgentApprovalService extends TypertRemoteService {
     markRemoteMethod(this, "getState", "getState");
     markRemoteMethod(this, "setModel", "setModel");
     markRemoteMethod(this, "setJudgeMode", "setJudgeMode");
-    markRemoteMethod(this, "setReviewDefault", "setReviewDefault");
     markRemoteMethod(this, "setJevConfig", "setJevConfig");
     markRemoteMethod(this, "setApprovalTimeout", "setApprovalTimeout");
     markRemoteMethod(this, "toggle", "toggle");
@@ -610,14 +609,6 @@ export class AgentApprovalService extends TypertRemoteService {
      * Persisted; the wire field is `judgeMode`.
      */
     this._judgeMode = JUDGE_MODE_LLM;
-    /**
-     * v1.8.0: global default for the per-call review mode — when on, FRESH
-     * sessions (no genuine user message yet) auto-enter 自动审查 at creation,
-     * subject to the Jev gate. Resumed sessions keep their folded selection;
-     * per-session switching stays in the /permission menu and /agent-review
-     * command. Persisted (`reviewDefault` in config.json).
-     */
-    this._reviewDefault = false;
     /**
      * TypeSafe Jev direct backend settings — v1.10.0: the INDEPENDENT
      * configuration of the 自动审查 (per-call review) mode, no longer part of
@@ -679,12 +670,20 @@ export class AgentApprovalService extends TypertRemoteService {
         if (!event || event.type !== "permission/preset") return;
         const name = event.data && event.data.preset;
         if (name === PRESET_NAME) {
-          if (this._enabled.has(session.id)) return;
+          const entry = this._enabled.get(session.id);
+          if (entry !== undefined && entry.mode === "escalation") return;
           const agent = this.ctx.agents.get(session.id);
           if (agent === undefined) return; // not live (yet) — agent/created covers it
-          this._enableCore(session, agent, "escalation");
+          // Switching 自动审查 → 自动审批 must REWRITE the mode, not bail out:
+          // a plain "already enabled" guard left the entry at mode "review",
+          // so every call kept being claimed by tools/pre-execute while the
+          // menu already displayed 自动审批.
+          if (!this._switchCore(session, agent, "escalation")) {
+            this._enableCore(session, agent, "escalation");
+          }
         } else if (name === REVIEW_PRESET_NAME) {
-          if (this._enabled.has(session.id)) return;
+          const entry = this._enabled.get(session.id);
+          if (entry !== undefined && entry.mode === "review") return;
           const agent = this.ctx.agents.get(session.id);
           if (agent === undefined) return; // not live (yet) — agent/created covers it
           // Gate layer 3: selecting 自动审查 without a usable Jev judge must
@@ -693,7 +692,9 @@ export class AgentApprovalService extends TypertRemoteService {
             this._reviewGateFallback(session, agent);
             return;
           }
-          this._enableCore(session, agent, "review");
+          if (!this._switchCore(session, agent, "review")) {
+            this._enableCore(session, agent, "review");
+          }
         } else if (this._enabled.has(session.id)) {
           this._enabled.delete(session.id);
           this._trusted.delete(session.id);
@@ -723,22 +724,6 @@ export class AgentApprovalService extends TypertRemoteService {
             return;
           }
           this._enableCore(agent.session, agent, "review");
-          return;
-        }
-        // v1.8.0 global default (setReviewDefault): a FRESH session (no
-        // genuine user message yet) auto-enters per-call review when
-        // configured and the Jev gate is open. Resumed sessions keep their
-        // folded selection — flipping them would override past choices.
-        if (
-          this._reviewDefault &&
-          (preset === undefined || preset === PRESET_NAME) &&
-          this._isFreshSession(agent.session) &&
-          this._jevGateOk()
-        ) {
-          this._enableCore(agent.session, agent, "review");
-          if (this._presetRegistered(REVIEW_PRESET_NAME)) {
-            agent.session.append("permission/preset", { preset: REVIEW_PRESET_NAME });
-          }
           return;
         }
         if (preset === PRESET_NAME) {
@@ -796,10 +781,14 @@ export class AgentApprovalService extends TypertRemoteService {
         handler: (invocation) => {
           const arg = invocation.rawInput.trim().toLowerCase();
           if (arg === "") {
-            const on = this._enabled.has(invocation.agent.session.id);
+            const entry = this._enabled.get(invocation.agent.session.id);
+            const mode = entry !== undefined ? entry.mode : "off";
             return {
               kind: "success",
-              text: "agent-approval is " + (on ? "ON" : "OFF") + " for this session (usage: /agent-approval on|off)",
+              text:
+                "agent-approval is " +
+                (mode === "off" ? "OFF" : mode === "review" ? "OFF (this session is in 自动审查 per-call review mode)" : "ON") +
+                " for this session (usage: /agent-approval on|off)",
             };
           }
           if (arg !== "on" && arg !== "off") {
@@ -885,13 +874,15 @@ export class AgentApprovalService extends TypertRemoteService {
     const entry = this._enabled.get(session.id);
     if (on) {
       if (entry !== undefined && entry.mode === "review") return "自动审查 is already ON for this session";
-      if (entry !== undefined) {
-        return "自动审批 is already ON for this session — switch modes through the /permission menu";
-      }
       if (!this._jevGateOk()) {
         return "自动审查 requires the Jev judge: configure a Jev API key in Settings → 自动审批 → 「自动审查」first";
       }
-      this._enableCore(session, agent, "review");
+      // Already enabled as 自动审批: switch modes here too, so the commands
+      // are symmetric with the /permission menu instead of dead-ending on
+      // "switch modes through the menu".
+      if (!this._switchCore(session, agent, "review")) {
+        this._enableCore(session, agent, "review");
+      }
       if (this._presetRegistered(REVIEW_PRESET_NAME)) {
         // Same shared-bundle rule as the escalation mode: the appended
         // selection is what makes the menu display 自动审查.
@@ -962,20 +953,6 @@ export class AgentApprovalService extends TypertRemoteService {
     }
   }
 
-  /**
-   * Whether a session has not yet seen a genuine user message — i.e. it is
-   * being created rather than resumed. Guards the review default: a resumed
-   * session carries its past work, so its folded preset selection wins.
-   * Unknown shapes read as resumed (never hijack a session we cannot read).
-   */
-  _isFreshSession(session) {
-    try {
-      return this._recentUserContext(session).first === "";
-    } catch (e) {
-      return false;
-    }
-  }
-
   /** The first NON-agent-approval table entry whose bundle matches, or the
    *  still-matching previous selection; undefined when nothing matches. */
   _presetForBundle(sandbox, approval) {
@@ -1001,8 +978,15 @@ export class AgentApprovalService extends TypertRemoteService {
    */
   _enable(agent, appendPreset) {
     const session = agent.session;
-    if (this._enabled.has(session.id)) return "agent-approval is already ON for this session";
-    this._enableCore(session, agent);
+    const entry = this._enabled.get(session.id);
+    if (entry !== undefined && entry.mode === "escalation") {
+      return "agent-approval is already ON for this session";
+    }
+    // Already enabled as 自动审查: switch modes instead of reporting a false
+    // "already ON" (the entry exists, but not in the mode being asked for).
+    if (!this._switchCore(session, agent, "escalation")) {
+      this._enableCore(session, agent);
+    }
     if (appendPreset && this._presetRegistered()) {
       // Our own session/event listener fires on this append; _enableCore has
       // already populated the map, so it no-ops there.
@@ -1039,6 +1023,38 @@ export class AgentApprovalService extends TypertRemoteService {
     });
     if (effectiveSandbox !== baseMode) session.append("sandbox/mode", { mode: baseMode });
     approval.setPolicy(agent, "ask");
+  }
+
+  /**
+   * Move an ALREADY-enabled session from one judging mode to the other,
+   * preserving the restore point captured at first enable.
+   *
+   * Calling `_enableCore` again would be wrong: it re-captures the knobs the
+   * OUTGOING mode just pinned (review pins Full access) as the "previous"
+   * values, so the next `_disable` would restore Full access instead of the
+   * user's own sandbox. Keep the original `prev*` triple verbatim and only
+   * re-pin `mode`, the mode's sandbox base, and the `ask` policy.
+   *
+   * Returns false when the session is not enabled at all — the caller then
+   * enables it through `_enableCore` instead.
+   */
+  _switchCore(session, agent, mode) {
+    const prev = this._enabled.get(session.id);
+    if (prev === undefined) return false;
+    if (prev.mode === mode) return true;
+    const isReview = mode === "review";
+    const baseMode = isReview ? REVIEW_BASE_MODE : BASE_MODE;
+    this._enabled.set(session.id, {
+      prevSandbox: prev.prevSandbox,
+      prevApproval: prev.prevApproval,
+      prevPreset: prev.prevPreset,
+      mode: isReview ? "review" : "escalation",
+    });
+    if (this._lastKnob(session, "sandbox/mode", "mode") !== baseMode) {
+      session.append("sandbox/mode", { mode: baseMode });
+    }
+    this.ctx.approval.setPolicy(agent, "ask");
+    return true;
   }
 
   /**
@@ -1276,7 +1292,6 @@ export class AgentApprovalService extends TypertRemoteService {
     const body = JSON.stringify({
       model: { provider: this._model.provider, model: this._model.model },
       judgeMode: this._judgeMode,
-      reviewDefault: this._reviewDefault,
       jev: this._jevShape(),
       timeoutMs: this._timeoutMs,
       rules: this._rules,
@@ -1312,9 +1327,6 @@ export class AgentApprovalService extends TypertRemoteService {
         }
         if (cfg.judgeMode === JUDGE_MODE_LLM || cfg.judgeMode === JUDGE_MODE_SUBAGENT) {
           this._judgeMode = cfg.judgeMode;
-        }
-        if (typeof cfg.reviewDefault === "boolean") {
-          this._reviewDefault = cfg.reviewDefault;
         }
         if (cfg.jev && typeof cfg.jev === "object") {
           if (typeof cfg.jev.apiKey === "string") this._jev.apiKey = cfg.jev.apiKey;
@@ -1472,7 +1484,12 @@ export class AgentApprovalService extends TypertRemoteService {
   async _onApprovalRequest(req, next) {
     const agent = req.agent;
     const session = agent.session;
-    if (!this._enabled.has(session.id)) return next();
+    // Escalation claims ONLY. A session in 自动审查 mode is gated per call by
+    // tools/pre-execute; judging its escalations here too would run two
+    // independent judges over the same session (the "两模式互不串台"
+    // invariant this filter is what enforces).
+    const entry = this._enabled.get(session.id);
+    if (entry === undefined || entry.mode !== "escalation") return next();
     // Without a signal we cannot race cancellation; leave it to the chain.
     if (req.signal === undefined) return next();
 
@@ -2630,7 +2647,6 @@ export class AgentApprovalService extends TypertRemoteService {
         model: { provider: this._model.provider, model: this._model.model },
         judgeMode: this._judgeMode,
         reviewAvailable: this._jevGateOk(),
-        reviewDefault: this._reviewDefault,
         jev: this._jevShape(),
         timeoutMs: this._timeoutMs,
         enabledSessions: this._sessionInfos(),
@@ -2681,48 +2697,31 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
-   * v1.8.0: the global default for the per-call review mode. When on, FRESH
-   * sessions (no genuine user message yet) auto-enter 自动审查 at creation,
-   * subject to the Jev gate (gate closed → the normal default applies and a
-   * default `agent-review` fill-in still bounces to 自动审批). Resumed
-   * sessions are never touched — their folded preset selection wins. The
-   * per-session switch stays in the /permission menu and /agent-review.
-   * Persisted.
-   */
-  async setReviewDefault(request) {
-    this._reviewDefault = !!(request && request.on);
-    this._persistConfig();
-    return { ok: true, value: { reviewDefault: this._reviewDefault } };
-  }
-
-  /**
    * Set the TypeSafe Jev backend settings (only provided fields change) — the
    * 自动审查 mode's own, independent configuration (v1.10.0: Jev is not a
    * judge provider, so nothing here touches the approval route). Saving a
-   * resolvable key OPENS the review gate, and opening the gate for the first
-   * time turns 自动审查 on for new sessions (`_reviewDefault`) — "配置了 Jev
-   * 就启用自动审查". The same card switches it back off. `confidence` is the
-   * gate below which Jev's answer is not trusted and the call is denied;
-   * clamped to [0.01, 0.99]. Persisted.
+   * resolvable key only OPENS the gate: 自动审查 becomes selectable (the
+   * /permission row appears, the command stops erroring) and nothing more.
+   * v1.10.1: it no longer drags new sessions into per-call review on Full
+   * access — entering the mode is always a deliberate per-session choice, and
+   * configuring a judge must not silently widen a session's sandbox.
+   * `confidence` is the gate below which Jev's answer is not trusted and the
+   * call is denied; clamped to [0.01, 0.99]. Persisted.
    */
   async setJevConfig(request) {
     const r = request && typeof request === "object" ? request : {};
-    const gateBefore = this._jevGateOk();
     if (typeof r.apiKey === "string") this._jev.apiKey = r.apiKey.trim();
     if (typeof r.endpoint === "string") this._jev.endpoint = r.endpoint.trim();
     if (typeof r.model === "string") this._jev.model = r.model.trim();
     if (typeof r.confidence === "number" && Number.isFinite(r.confidence)) {
       this._jev.confidence = Math.min(0.99, Math.max(0.01, r.confidence));
     }
-    const gateAfter = this._jevGateOk();
-    if (gateAfter && !gateBefore) this._reviewDefault = true;
     this._persistConfig();
     return {
       ok: true,
       value: {
         jev: this._jevShape(),
-        reviewAvailable: gateAfter,
-        reviewDefault: this._reviewDefault,
+        reviewAvailable: this._jevGateOk(),
       },
     };
   }

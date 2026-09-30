@@ -89,7 +89,6 @@ const stateValueSchema = z
     model: modelRouteSchema,
     judgeMode: judgeModeSchema,
     reviewAvailable: z.boolean(),
-    reviewDefault: z.boolean(),
     jev: jevConfigSchema,
     timeoutMs: z.number(),
     enabledSessions: z.array(enabledSessionSchema).readonly(),
@@ -109,23 +108,17 @@ const setJudgeModeValueSchema = z
   })
   .readonly();
 
-const setReviewDefaultValueSchema = z
-  .object({
-    reviewDefault: z.boolean(),
-  })
-  .readonly();
-
 /**
  * v1.10.0: the TypeSafe Jev backend belongs to the 自动审查 (per-call review)
  * mode alone — it is NOT a judge provider. `setJevConfig` therefore reports
- * the review gate and the (possibly auto-enabled) review default so the
- * client can reflect "配置了 Jev 就启用自动审查" without a second round trip.
+ * the review gate so the client can reflect that 自动审查 became selectable.
+ * v1.10.1: it reports nothing else — configuring a key no longer auto-enables
+ * per-call review for new sessions.
  */
 const setJevValueSchema = z
   .object({
     jev: jevConfigSchema,
     reviewAvailable: z.boolean(),
-    reviewDefault: z.boolean(),
   })
   .readonly();
 
@@ -207,7 +200,6 @@ function okResult(valueSchema) {
 const stateResultSchema = okResult(stateValueSchema);
 const setModelResultSchema = okResult(setModelValueSchema);
 const setJudgeModeResultSchema = okResult(setJudgeModeValueSchema);
-const setReviewDefaultResultSchema = okResult(setReviewDefaultValueSchema);
 const setJevResultSchema = okResult(setJevValueSchema);
 const setTimeoutResultSchema = okResult(setTimeoutValueSchema);
 const toggleResultSchema = okResult(toggleValueSchema);
@@ -225,10 +217,6 @@ const _agentApproval_setModel_parameter_0$schema = z.object({
 
 const _agentApproval_setJudgeMode_parameter_0$schema = z.object({
   mode: judgeModeSchema,
-});
-
-const _agentApproval_setReviewDefault_parameter_0$schema = z.object({
-  on: z.boolean(),
 });
 
 const _agentApproval_setJevConfig_parameter_0$schema = z.object({
@@ -333,33 +321,6 @@ export const TYPERT = {
         typeSymbol: "dsh-agent-approval#AgentApprovalSetJudgeModeResult",
         schema: setJudgeModeResultSchema,
         create: () => setJudgeModeResultSchema,
-      },
-      sourceLocation: { file: "index.js", line: 1, column: 1 },
-    },
-    {
-      id: "dsh-agent-approval#agentApproval/setReviewDefault",
-      service: "agentApproval",
-      namespace: "agentApproval",
-      method: "setReviewDefault",
-      invocation: { kind: "direct" },
-      parameters: [
-        {
-          name: "request",
-          wire: "request",
-          source: "json",
-          codec: {
-            mode: "strict",
-            typeSymbol: "dsh-agent-approval#AgentApprovalSetReviewDefaultRequest",
-            schema: _agentApproval_setReviewDefault_parameter_0$schema,
-            create: () => _agentApproval_setReviewDefault_parameter_0$schema,
-          },
-        },
-      ],
-      result: {
-        mode: "strict",
-        typeSymbol: "dsh-agent-approval#AgentApprovalSetReviewDefaultResult",
-        schema: setReviewDefaultResultSchema,
-        create: () => setReviewDefaultResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -650,7 +611,7 @@ export const TYPERT = {
           {
             name: "AgentApprovalSetJevResult",
             declaration:
-              "export type AgentApprovalSetJevResult = { ok: true; value: { readonly jev: AgentApprovalJevConfig; readonly reviewAvailable: boolean; readonly reviewDefault: boolean } } | { ok: false; error: { code: string; message?: string } };",
+              "export type AgentApprovalSetJevResult = { ok: true; value: { readonly jev: AgentApprovalJevConfig; readonly reviewAvailable: boolean } } | { ok: false; error: { code: string; message?: string } };",
           },
           {
             name: "AgentApprovalEnabledSession",
@@ -670,17 +631,7 @@ export const TYPERT = {
           {
             name: "AgentApprovalStateValue",
             declaration:
-              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly judgeMode: 'llm' | 'subagent';\n    readonly reviewAvailable: boolean;\n    readonly reviewDefault: boolean;\n    readonly jev: AgentApprovalJevConfig;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n}",
-          },
-          {
-            name: "AgentApprovalSetReviewDefaultRequest",
-            declaration:
-              "export interface AgentApprovalSetReviewDefaultRequest {\n    readonly on: boolean;\n}",
-          },
-          {
-            name: "AgentApprovalSetReviewDefaultResult",
-            declaration:
-              "export type AgentApprovalSetReviewDefaultResult = { ok: true; value: { readonly reviewDefault: boolean } } | { ok: false; error: { code: string; message?: string } };",
+              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly judgeMode: 'llm' | 'subagent';\n    readonly reviewAvailable: boolean;\n    readonly jev: AgentApprovalJevConfig;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n}",
           },
           {
             name: "AgentApprovalSetJudgeModeRequest",

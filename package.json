@@ -1,6 +1,6 @@
 {
   "name": "@duke-dsh-plugins/dsh-agent-approval",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "Agent-decided approvals for DeepSeek Harness: an 自动审批 permission mode where every sandbox escalation is judged automatically by an LLM (default judge: one direct LLM call with no subagent session; optional isolated judge subagent) plus an independent 自动审查 per-call review mode (Full access base; every tool call reviewed before execution by the TypeSafe Jev decision model, with interpreter scripts the command references expanded into the judge state so temp scripts are judged by their actual code; risky calls rejected with no human fallback), with a configurable judge model and a per-session audit trail in the conversation window's 审批 tab.",
   "repository": {
     "type": "git",
@@ -52,6 +52,7 @@
   },
   "scripts": {
     "patch:glyph": "node scripts/patch-glyph.mjs",
-    "check": "node --check index.js && node --check client.js && node --check typert.host.js && node --check scripts/patch-glyph.mjs && node --check scripts/check-typert-manifest.mjs && node scripts/check-typert-manifest.mjs"
+    "check:mode": "node scripts/check-mode-switch.mjs",
+    "check": "node --check index.js && node --check client.js && node --check typert.host.js && node --check scripts/patch-glyph.mjs && node --check scripts/check-typert-manifest.mjs && node --check scripts/check-mode-switch.mjs && node scripts/check-typert-manifest.mjs && node scripts/check-mode-switch.mjs"
   }
 }

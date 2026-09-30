@@ -353,15 +353,6 @@ window.__ModuleLoader__.load({
           result: result("dsh-agent-approval#AgentApprovalSetJudgeModeResult"),
         },
         {
-          id: "dsh-agent-approval#agentApproval/setReviewDefault",
-          service: "agentApproval",
-          namespace: "agentApproval",
-          method: "setReviewDefault",
-          invocation: { kind: "direct" },
-          parameters: param("dsh-agent-approval#AgentApprovalSetReviewDefaultRequest"),
-          result: result("dsh-agent-approval#AgentApprovalSetReviewDefaultResult"),
-        },
-        {
           id: "dsh-agent-approval#agentApproval/setJevConfig",
           service: "agentApproval",
           namespace: "agentApproval",
@@ -548,11 +539,6 @@ window.__ModuleLoader__.load({
         const judgeModeSlot = React.useState("llm");
         const judgeMode = judgeModeSlot[0];
         const setJudgeMode = judgeModeSlot[1];
-        // v1.8.0: global default — fresh sessions auto-enter 自动审查
-        // (Jev-gated); shown as the 逐调用审查 switch when Provider = Jev.
-        const reviewDefaultSlot = React.useState(false);
-        const reviewDefault = reviewDefaultSlot[0];
-        const setReviewDefault = reviewDefaultSlot[1];
         const timeoutSlot = React.useState("");
         const setTimeoutDraft = timeoutSlot[1];
         // Jev backend drafts — the 自动审查 card's own configuration, shown
@@ -587,8 +573,6 @@ window.__ModuleLoader__.load({
               setJudgeMode(s.judgeMode === "subagent" ? "subagent" : "llm");
               // Gate snapshot also hides/shows the 自动审查 menu row.
               setReviewGate(s.reviewAvailable === true);
-              // A not-yet-restarted old host sends no `reviewDefault` — off.
-              setReviewDefault(s.reviewDefault === true);
               setTimeoutDraft(String(s.timeoutMs));
               // A not-yet-restarted old host sends no `jev` field — keep drafts.
               setJevKey(s.jev && typeof s.jev.apiKey === "string" ? s.jev.apiKey : "");
@@ -639,23 +623,6 @@ window.__ModuleLoader__.load({
             })
             .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
         };
-        const saveReviewDefault = (on) => {
-          if (typeof remote.setReviewDefault !== "function") {
-            setNote("Host 半未更新（缺少 setReviewDefault）：请重装本插件并重启 DSH。");
-            return;
-          }
-          remote
-            .setReviewDefault({ on: on })
-            .then(() => {
-              setReviewDefault(on);
-              setNote(
-                on
-                  ? "逐调用审查已开启：新开会话自动进入自动审查（Jev 判定每个工具调用）"
-                  : "逐调用审查已关闭：新会话按默认预设开启",
-              );
-            })
-            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
-        };
         const jevKey = jevKeySlot[0];
         const jevEndpoint = jevEndpointSlot[0];
         const jevModel = jevModelSlot[0];
@@ -675,14 +642,13 @@ window.__ModuleLoader__.load({
             .then((res) => {
               const v = pick(res) || {};
               setReviewGate(v.reviewAvailable === true);
-              setReviewDefault(v.reviewDefault === true);
               refresh();
-              // Configuring Jev opens the review gate; the Host turns the
-              // per-call review default on at that exact moment (v1.10.0).
+              // Configuring Jev only OPENS the gate: 自动审查 becomes
+              // selectable. It no longer pulls new sessions into per-call
+              // review (v1.10.1) — the mode is always a per-session choice.
               setNote(
                 v.reviewAvailable === true
-                  ? "Jev 配置已保存：自动审查已就绪" +
-                    (v.reviewDefault === true ? "，新开会话自动进入逐调用审查" : "")
+                  ? "Jev 配置已保存：自动审查已就绪，可在 /permission 菜单或 /agent-review 逐会话开启"
                   : "Jev 配置已保存，但 API Key 仍为空：自动审查保持关闭",
               );
             })
@@ -880,7 +846,7 @@ window.__ModuleLoader__.load({
           h(
             "div",
             { className: "aapr-card" },
-            h("h3", null, "自动审查（逐调用审查）"),
+            h("h3", null, "自动审查"),
             h(
               "div",
               { className: "aapr-muted" },
@@ -888,27 +854,7 @@ window.__ModuleLoader__.load({
               h("br", null),
               "Jev 是结构化决策模型（System One）：直连 TypeSafe API，不创建审批子会话，毫秒级返回带校准概率的裁决。审计「理由」由概率分布合成（Jev 本身不生成文字）；置信度低于阈值时按 fail-closed 处理（记 unavailable，不放行也不记拒绝）。对中文任务上下文的准确率略低于英语。API Key 明文保存在本机 config.json；留空时使用环境变量 TYPESAFE_API_KEY。",
               h("br", null),
-              "保存一个可用的 API Key 即完成配置，自动审查随之启用（新开会话自动进入）；下面同一张卡片可以随时关掉它。",
-            ),
-            h(
-              "div",
-              { className: "aapr-row" },
-              h(
-                "label",
-                null,
-                "逐调用审查：",
-                h(
-                  "select",
-                  {
-                    className: "aapr-select",
-                    value: reviewDefault ? "on" : "off",
-                    disabled: state !== null && state.reviewAvailable !== true,
-                    onChange: (e) => saveReviewDefault(e.target.value === "on"),
-                  },
-                  h("option", { value: "on" }, "开（新会话自动审查每个工具调用）"),
-                  h("option", { value: "off" }, "关（新会话按默认预设）"),
-                ),
-              ),
+              "保存一个可用的 API Key 即完成配置，自动审查随之在 /permission 菜单中可选；是否进入该模式始终是每个会话自己的选择（菜单或 /agent-review on），保存 Key 不会改动任何会话。",
             ),
             h(
               "div",

@@ -10,7 +10,7 @@
 - 审批 Agent 在**独立会话**里运行：零父级上下文、全局工具全部空白（`toolFilter: {allow:[]}`）、审批策略被委派机制钉死为 `never`（不可能递归再审批），必须通过 `structured_output` 结构化工具给出裁决：`{ decision: approve|reject, riskLevel, rationale }`。
 - **风险即拒绝**：破坏性 / 不可逆 / 越界 / 理由与实际参数不符 → `reject`；只有"安全、可逆、与任务相符、理由诚实"才 `approve`。
 - **Fail-closed**：审批 Agent 启动失败、超时、结果不合法、请求被取消 → 一律按拒绝处理（`unavailable`/`cancelled`），绝不静默放行。
-- **设置面板**新增 **自动审批** 页（`settings.section`），**两种模式分开摆**（v1.10.0）：上半部分是**自动审批**——配置审批模型（provider/model 或 Harness 默认模型，**只能是 LLM 路由**，v1.10.0 起不再提供 Jev）与审批超时、**裁决方式**（LLM 直连 / 隔离子代理）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化）；下半部分是**独立的「自动审查」卡片**——TypeSafe Jev 专属配置（API Key / 模型 / Endpoint / 置信度阈值，**恒显示，不随任何 Provider 选择隐藏**）+「逐调用审查」全局默认开关（**保存可用的 Jev Key 即自动开启**）。**审计不在这里**：会话窗口顶部新增**「审批」标签页**（`conversation.view` ring，紧邻「轨迹」；chat=0 / trajectory=10 / 审批=11），按会话折叠展示审批记录（**倒序、最新在上**；结论/风险/模型/耗时/理由，悬停看完整理由与工具参数，行内可一键「加白」）——记录存在**会话目录内的独立旁路文件**（见第 6 节）。
+- **设置面板**新增 **自动审批** 页（`settings.section`），**两种模式分开摆**（v1.10.0）：上半部分是**自动审批**——配置审批模型（provider/model 或 Harness 默认模型，**只能是 LLM 路由**，v1.10.0 起不再提供 Jev）与审批超时、**裁决方式**（LLM 直连 / 隔离子代理）、查看已开启会话（chip 显示**与会话列表同源的标题**（Host 侧经可选服务 `sessionTitle` 折叠，缺席降级为空串）+ 短 id，悬停看完整会话 ID 与工作区 cwd；`getState` 的 `enabledSessions` 为 `{id,title,cwd}[]`，client 兼容旧 Host 的 `string[]` 形状）、**放行/拒绝规则表**（deny/allow 规则先于模型短路，持久化）；下半部分是**独立的「自动审查」卡片**——TypeSafe Jev 专属配置（API Key / 模型 / Endpoint / 置信度阈值，**恒显示，不随任何 Provider 选择隐藏**）；**v1.10.1 起该卡片只剩这四个字段**：全局默认开关（「逐调用审查」下拉）已删除，保存可用的 Jev Key 只让自动审查**变为可选**，不再把任何会话拉进审查。**审计不在这里**：会话窗口顶部新增**「审批」标签页**（`conversation.view` ring，紧邻「轨迹」；chat=0 / trajectory=10 / 审批=11），按会话折叠展示审批记录（**倒序、最新在上**；结论/风险/模型/耗时/理由，悬停看完整理由与工具参数，行内可一键「加白」）——记录存在**会话目录内的独立旁路文件**（见第 6 节）。
 - 输入框 `/permission` 菜单的「自动审批」预设 + `/agent-approval on|off` 命令为当前会话开关（**刻意没有 composer chip**——开关本就属于权限菜单，菜单旁边再放一个属冗余，已移除）；关闭时**恢复开启前的权限旋钮**（沙箱模式 + 审批策略）。
 
 ## 目录结构
@@ -22,6 +22,7 @@ dsh-agent-approval/
 ├── client.js             # Client 半：window.__ModuleLoader__.load bundle（设置页 + Remote 调用）
 ├── typert.host.js        # Typert Host manifest：agentApproval Remote 服务的 schema/调用描述
 ├── cordis.patch.yml      # dsh bundle patch（挂载行 + permission 预设表覆盖）
+├── scripts/check-mode-switch.mjs # 模式切换/审查语义回归（mock ctx 驱动真实 Service.init 闭包，已挂进 npm run check）
 ├── scripts/patch-glyph.mjs # 可选：权限菜单图标补丁（标准安装不自动执行）
 ├── .github/workflows/release.yml  # 打 v* 标签时构建并发布 GitHub Release
 ├── AGENTS.md             # 本文件
@@ -113,7 +114,7 @@ Jev 是 "System One" 决策模型，**不在** `llm.listProviders()` 目录里�
 - **questions**：`JEV_QUESTIONS` 只是 `JEV_REVIEW_QUESTIONS` 的 **criteria 底座**（`decision` = Choice(approve/reject，**策略全部写进 criteria 描述**——Jev 按字面读指令、领域知识只能进 state+criteria)；`riskLevel` = Choice(low/medium/high)；`concreteRisk` = Noul（"是否存在具体可信风险"辅助信号，只进审计理由）。`_jevRequest` 的 `questions` 缺省值已改成 review 组，**别改回去**。
 - **置信度门控**：`decision.confidence < 阈值`（默认 0.5，可配 0.01–0.99）→ 审查**拒绝该次调用**且审计记 `unavailable`——**对称适用**：低置信的 reject 也不记拒绝（v1.4.0 误杀治理的对称版："模型没把握就不裁决"）。校验与门控全部在 `_jevParse` 一处。
 - **审计**：model 列 `jev(<served version>)`——响应体 `model` 字段会解析别名（请求 jev-latest → 记 jev-1.13.0）；理由列由概率分布合成（**Jev 不生成文字**，没有自然语言推理可记；v1.7.2 起同时含**风险轴**的置信度与 `p low/medium/high`——`riskLevel` 与 `decision` 是两条独立问题，**risk=high 不改变 outcome**，但审计理由必须能看出 high 的把握度，字段缺失只省略、绝不改变校验门槛）；`childSessionId` 为空（没有子会话）。
-- **wire 同步**：`setJevConfig` invocation（index.js `markRemoteMethod` + typert.host.js `jevConfigSchema`/invocation/`AgentApprovalJevConfig` 等类型 + client.js 描述符）；**v1.10.0 起 setJevConfig 的 result 多带 `reviewAvailable` + `reviewDefault`**（strict schema 三处同步），因为「保存 Jev 即启用自动审查」的结果要直接回给 client；`getState` 带 `jev` 字段，client 对旧 Host 缺该字段时保留空草稿降级（saveJev 还有 `typeof remote.setJevConfig === "function"` 守卫）。
+- **wire 同步**：`setJevConfig` invocation（index.js `markRemoteMethod` + typert.host.js `jevConfigSchema`/invocation/`AgentApprovalJevConfig` 等类型 + client.js 描述符）；`setJevConfig` 的 result 带 `reviewAvailable`，让 client 一趟就知道 gate 开没开；**v1.10.1 起 result 与 `getState` 都不再有 `reviewDefault`**（全局默认开关已删除，见第 11b 节）；`getState` 带 `jev` 字段，client 对旧 Host 缺该字段时保留空草稿降级（saveJev 还有 `typeof remote.setJevConfig === "function"` 守卫）。
 - **已知限制**（设置卡片已注明）：Jev 官方声明中日韩文本"可处理但准确率较低"（审查 state 里的中文任务上下文会打折）；early access 阶段速率限制可能变化——所有异常都归 fail-closed，不会误放行。
 
 ### 5. 规则表与会话内信任（v1.4.0 起，先于模型裁决）
@@ -257,14 +258,16 @@ Jev 是 "System One" 决策模型，**不在** `llm.listProviders()` 目录里�
 - **开启门槛（Jev gate，三层；v1.10.0 判据改为纯 Jev 配置）**：判据 `_jevGateOk()` = **Jev API Key 可解析**（config.json 或 `TYPESAFE_API_KEY`），**不再看审批 Provider**（那条耦合随"Jev 不再是审批判定模型"一起删了）。① client 按 `getState().reviewAvailable` 设 `body[data-dsh-agent-approval-review-gate]`，gate 关时 CSS 隐藏「自动审查」菜单行（`registerReviewMenuItem` + `REVIEW_ITEM_MARKER`）；② 命令/`_setReviewEnabled` 开启前校验；③ **联动兜底**（`_reviewGateFallback`）：preset 事件或重启恢复折出 `agent-review` 而 gate 关 → 记审计（model 列 `gate`）+ `permissionPresets.set(session, PRESET_NAME)` 弹回自动审批预设，**绝不让会话裸奔 Full access**。
 - **审计**：entry 新增 `mode: "escalation" | "review"`（`_recordShape` 统一补齐，旧旁路行缺省折 `escalation`；typert strict schema 三处同步；client 工具列显示「逐调用」徽标）。
 - **命令/生命周期**：`/agent-review on|off`（`_setReviewEnabled` → `_enableCore(session, agent, "review")`，钉 `danger-full-access` + `ask`）；关闭/切走走 `_disable`（恢复 prev 旋钮，返回文案按 entry.mode 区分）；`agent/created` 折出 `agent-review` 重启恢复（**再过一遍 gate**，key 被删则弹回）；`_enabled` 条目带 `mode`，`_onPreExecute` 只认 `mode === "review"` 的会话，`_onApprovalRequest` 只认 escalation 会话（两模式互不串台）。
-- **全局默认开关（v1.8.0，`setReviewDefault`，设置页「逐调用审查」下拉）**：开启后**新会话**（`_isFreshSession`：日志里还没有真实用户消息）自动进入自动审查（再过 gate；不过则按普通默认走）。**恢复的会话绝不翻转**——它们折叠出的 preset 是用户过去的选择。现存会话的切换仍走菜单/命令。持久化在 config.json `reviewDefault`。**v1.10.0：「配置了 Jev 就启用自动审查」**——`setJevConfig` 在 gate 由关变开的那一刻把 `_reviewDefault` 置 `true`（gate 已开时保存不翻转用户的显式选择），并把 `reviewAvailable`/`reviewDefault` 一并回给 client，同一张卡片可随时关掉。
-- **设置页布局（v1.10.0 起固定分区，不再随 Provider 切换）**：上半 = 自动审批（Provider/Model + 裁决方式下拉，**恒显示**，Jev 已从 Provider 列表移除）+ 审批超时；下半 = 独立的「自动审查」卡片（Jev 四字段 + 逐调用审查开关，**恒显示**）。旧的"Provider = Jev 就隐藏裁决方式、隐藏审查卡片"条件布局已删除，**别再加回来**。
+- **全局默认开关（v1.8.0 引入，v1.10.1 整条删除，勿再加回来）**：原 `setReviewDefault` Remote 方法 + 设置页「逐调用审查」下拉 + config.json `reviewDefault` + `getState`/`setJevConfig` 的 `reviewDefault` 返回字段，**四处已一并删除**，`_isFreshSession` 也随之成为死代码被删。删除理由（用户裁定）：v1.10.0 起两模式已彻底分开，**"Jev 配好了" 只该意味着自动审查可选**，不该再附带一条"所有新会话默认进 Full access 逐调用审查"的策略——保存一次 Key 就静默把后续每个新会话的沙箱基线抬到 Full access，既冗余又是提权 footgun（而且它正是 2026-10-01 模式串台事故的上游成因，见下条）。`agent/created` 现在只按日志里**实际记录的** preset 恢复模式，无 preset 事件的新会话一律不开任何模式。
+- **模式串台事故与 `_switchCore`（v1.10.1 修复，回归由 `scripts/check-mode-switch.mjs` 锁住）**：`session/event` 预设监听器原来用 `_enabled.has(session.id)` 判重（"有没有开任何模式"），而正确的问题是 `entry.mode`（"开的是不是这个模式"）——审查会话里选「自动审批」被直接吞掉，`mode` 永远停在 `"review"`，菜单显示自动审批但 `tools/pre-execute` 继续逐调用拦截。修法：新增 `_switchCore(session, agent, mode)` 做跨模式改写，**逐字保留**首次开启时捕获的 `prevSandbox`/`prevApproval`/`prevPreset`——直接复用 `_enableCore` 会把刚被钉住的 `danger-full-access` 当成"开启前的值"重新捕获，之后 `_disable` 会恢复到 Full access 而非用户原本的档位。**改这两个判重守卫时务必用 `entry.mode` 而非 `.has()`**。同时补上 `_onApprovalRequest` 缺失的 `mode !== "escalation"` 过滤（此前审查会话会被两个裁决器同时拦，"两模式互不串台"只在文档里成立）。`/agent-approval on` 与 `/agent-review on` 现在都能跨模式切换，互为对称、不再回"请去菜单改"的死胡同。
+- **设置页布局（v1.10.0 起固定分区，不再随 Provider 切换；v1.10.1 再去掉审查开关）**：上半 = 自动审批（Provider/Model + 裁决方式下拉，**恒显示**，Jev 已从 Provider 列表移除）+ 审批超时；下半 = 独立的「自动审查」卡片，**只有 Jev 四字段**（API Key / 模型 / Endpoint / 置信度阈值，**恒显示**）。旧的"Provider = Jev 就隐藏裁决方式、隐藏审查卡片"条件布局已删除，**别再加回来**；全局默认开关也**别再加回来**。
 - **勿与官方 experimental-auto-review 同开会话**：`tools/pre-execute` 会叠两层互不知情的裁决。
 
 ## 开发 / 验证
 
 ```bash
-npm run check            # node --check 全部脚本 + scripts/check-typert-manifest.mjs 双代 Typert 契约冒烟
+npm run check            # node --check 全部脚本 + check-typert-manifest.mjs 双代 Typert 契约冒烟 + check-mode-switch.mjs 模式切换回归
+npm run check:mode       # 只跑模式切换/审查语义回归（mock ctx，秒级）
 dsh plugin --profile web add /path/to/dsh-agent-approval   # 安装/重装到本机 DSH profile
 npm run patch:glyph      # 可选：权限菜单图标（幂等）
 ```
@@ -277,12 +280,13 @@ npm run patch:glyph      # 可选：权限菜单图标（幂等）
 5. 菜单切到 danger-full-access：模式自动关闭（`permission/preset` 事件联动，立即生效）；菜单切回 自动审批：模式自动开启，无需手动执行命令。
 6. 把审批超时调成 30000ms、审批模型指向一个不存在的路由 → 提权应 fail-closed 拒绝并记录 `unavailable`。
 7. 设置页加一条 allow 规则（如工具 `pwsh` + match 子串）→ 命中的提权**不再起审批子代理**，审计 model 列显示 `rule`；模型批准的提权在同一会话内以完全相同参数再次发起 → 直接放行，model 列显示 `trust`；「审批」tab 审计行点「加白」→ 规则表新增对应 allow 规则。
-8. （v1.10.0，第 4b 节）**设置页「自动审查」卡片**保存一个可用的 Jev API Key：提示条应显示「Jev 配置已保存：自动审查已就绪，新开会话自动进入逐调用审查」，「逐调用审查」下拉从禁用变可用且显示「开」；把 Key 清空再保存 → gate 关、开关禁用回「关」、`/permission` 菜单里「自动审查」行隐藏；配好 Key（或设 `TYPESAFE_API_KEY`）后开一个审查会话触发一次普通调用 → 亚秒级裁决、审计 model 列显示实际版本（如 `jev(jev-1.13.0)`）、理由列为概率合成文本；置信度阈值调到 0.99 → 大概率低置信（拒绝该次调用 + 记 `unavailable`）；Endpoint 指向不存在的主机 → 网络错误同样拒绝。**核验「审批不再有 Jev」**：审批 Provider 下拉**没有** TypeSafe Jev 项、「裁决方式」下拉**恒可见**；旧 config.json 带 `model.provider: typesafe` 的机器重启后 `getState().model.provider` 应为 `""`（已迁移）。
+8. （v1.10.1，第 4b/11b 节）**设置页「自动审查」卡片**保存一个可用的 Jev API Key：提示条应显示「Jev 配置已保存：自动审查已就绪，可在 /permission 菜单或 /agent-review 逐会话开启」，卡片里**只剩四个字段、没有「逐调用审查」下拉**；**新开一个会话，它应当停在默认预设、不自动进入自动审查**（这是本次删除的核心行为，旧版会直接进 Full access 逐调用审查）；把 Key 清空再保存 → gate 关、`/permission` 菜单里「自动审查」行隐藏；配好 Key（或设 `TYPESAFE_API_KEY`）后**手动**选「自动审查」或 `/agent-review on` → 触发一次普通调用，亚秒级裁决、审计 model 列显示实际版本（如 `jev(jev-1.13.0)`）、理由列为概率合成文本；置信度阈值调到 0.99 → 大概率低置信（拒绝该次调用 + 记 `unavailable`）；Endpoint 指向不存在的主机 → 网络错误同样拒绝。**核验「审批不再有 Jev」**：审批 Provider 下拉**没有** TypeSafe Jev 项、「裁决方式」下拉**恒可见**；旧 config.json 带 `model.provider: typesafe` 的机器重启后 `getState().model.provider` 应为 `""`（已迁移）。
 9. （DSH 0.1.7-rc.1 宿主，见第 10 节）重启后 `/permission` 菜单与设置页正常打开即证明 codec 双格式注册成功（旧版 ≤1.6.0 在 0.1.7 上这两处直接死）；权限菜单行的盾牌图标若缺失只影响观感（glyph-set 守卫跨代 CSS 类名），功能不受影响。
 10. （v1.8.0 功能 A，见第 11a 节）**默认即 LLM 直连**：开启自动审批后触发一次提权 → 亚秒级裁决、审计 model 列 `llm(<provider>/<model>)`、`childSessionId` 空，且**会话列表不出现审批员子会话**（零上下文污染核验）；「裁决方式」切「隔离子代理」→ 恢复旧行为（子会话出现、childSessionId 有值）；模型路由指向不存在的模型 → `unavailable`；超时调 30s + 大上下文 → `unavailable`；规则/信任短路照常（不发 LLM 请求）。
 11. （v1.8.0 功能 B，见第 11b 节）设置页启用 Jev 后，`/permission` 菜单出现 **自动审查**；未配 Jev 时该菜单行不可见、`/agent-review on` 报错；选中后触发一次普通工具调用 → 不打断、执行前经 Jev 一次（「审批」tab 出现 mode=逐调用 记录）；高危调用（如删工作区外文件）→ **直接拒绝、body 不执行**（工具结果带 `AGENT_REVIEW_DENIED` detail），**不弹人工**；低置信/超时/路由故障 → 同样直接拒绝并记 `unavailable`；同参数再调 → trust 短路；关掉 Jev 配置后重启 → 会话回退 自动审批 预设（不裸奔 Full access）；切回 workspace-write 预设 → 旋钮恢复、不再逐调用审查。
 12. （v1.8.0 改名）`/permission` 菜单显示 **自动审批**（不再是 Agent 审批），输入框权限触发按钮同步显示 **自动审批**，设置页侧栏出现 **自动审批** 页；菜单行盾牌图标与设置页 shield 图标照常显示（文本匹配 observer 已同步，无静默失配）；`/agent-approval on|off` 命令仍可用（命令名不动）。
 13. （DSH 0.2.0-rc.x 宿主，见第 10a 节）**装完先跑不带重启的两条**：`dsh --profile <p> --dump-config` 的 stderr 里没有本包（其余被拒插件的 `skipping profile bundle` 仍在是正常的），且 `npm run check` 挂上 `DSH_TYPERT_REGISTRY=<宿主>/node_modules/@deepseek-ai/dsh-typert-registry/lib/index.js` 后报 `real TypertRegistry accepted`。**这两条过了再重启**；重启后设置页出现「自动审批」、`/permission` 菜单有它；触发一次提权 → 不弹人工、审计落盘，且 `<sessionDir>/agent-approval.jsonl` 存在（**不是** `<DSH_HOME>/agent-approval/records/`——落在后者说明 `resolveCurrentLog` 那条路没走通，见第 10a 节）。
+14. （v1.10.1 模式串台回归，第 11b 节）**自动审查会话里切「自动审批」必须立刻生效**：开一个自动审查会话（工具逐调用被 Jev 拦），再从 `/permission` 菜单选「自动审批」→ 随后的普通工具调用**不再被逐调用拦截**（不再出现「工具 body 从未执行」），普通调用直接跑；反之在自动审批会话里选「自动审查」也立刻开始拦截。两条命令同样对称：`/agent-review on` → `/agent-approval on` 能切回来。关掉模式后沙箱应恢复到**用户原本的档位**（不是 Full access）。`npm run check` 里的 `scripts/check-mode-switch.mjs` 已把这几条连同"两模式不同时拦截"一起锁住。
 
 ## 发布
 
