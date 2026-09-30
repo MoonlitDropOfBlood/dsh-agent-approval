@@ -432,6 +432,100 @@ async function main() {
     check("folded 自动审查 without a key does not restore review", modeOf(w, session) !== "review", "mode=" + modeOf(w, session));
   }
 
+  // ---- review scope: only write / execute / transmit tools are judged -------
+
+  section("审查范围只覆盖 bash/pwsh/write/edit/str_replace_editor/mcp__*");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+
+    const log = [];
+    const session = makeSession("session-scope", log);
+    const agent = { session };
+    w.ctx.__agents.set(session.id, agent);
+    w.inst._enabled.set(session.id, {
+      prevSandbox: READ_ONLY,
+      prevApproval: "ask",
+      prevPreset: "read-only",
+      mode: "review",
+    });
+    w.inst._reviewCall = async () => ({ kind: "deny", info: { name: "AgentReviewDeniedError" } });
+
+    const probed = [
+      "bash",
+      "pwsh",
+      "write",
+      "edit",
+      "str_replace_editor",
+      "mcp__github__create_issue",
+      "read",
+      "read_image",
+      "glob",
+      "grep",
+      "web_search",
+      "web_fetch",
+      "todo_write",
+      "present",
+      "ask_user_question",
+      "cordis_inspect_list",
+      "job_list",
+      "list_subagent_models",
+      "list_mcp_resources",
+      // third-party plugin tools: never reviewed, by user ruling — plugins
+      // add and drop tools at will, so an allowlist can never track them.
+      "dsh_im_return_file",
+      "ralph",
+      "schedule_create",
+      "mcp_bogus__tool",
+      "notbash",
+      "rewrite",
+    ];
+    const judged = [];
+    const skipped = [];
+    for (const name of probed) {
+      const r = await preExecute(w, { agent, name, parent: undefined, arguments: {} });
+      (r.claimed ? judged : skipped).push(name);
+    }
+
+    const expectedJudged = [
+      "bash",
+      "pwsh",
+      "write",
+      "edit",
+      "str_replace_editor",
+      "mcp__github__create_issue",
+    ];
+    check(
+      "exactly the write/exec/transmit tools are judged",
+      JSON.stringify(judged) === JSON.stringify(expectedJudged),
+      "judged=" + JSON.stringify(judged),
+    );
+    check("reads are all skipped", !judged.includes("read") && !judged.includes("glob"), "judged=" + JSON.stringify(judged));
+    check(
+      "a near-miss name is not judged (mcp__ is two underscores)",
+      !judged.includes("mcp_bogus__tool") && !judged.includes("notbash") && !judged.includes("rewrite"),
+      "skipped=" + JSON.stringify(skipped),
+    );
+    check(
+      "third-party plugin tools are never judged",
+      !judged.includes("dsh_im_return_file") && !judged.includes("ralph") && !judged.includes("schedule_create"),
+      "judged=" + JSON.stringify(judged),
+    );
+    check(
+      "every probed tool is accounted for (judged + skipped = probed)",
+      judged.length + skipped.length === probed.length,
+      judged.length + " + " + skipped.length + " != " + probed.length,
+    );
+
+    // PTC: the outer transport stays unreviewed, its inner calls do not.
+    const outer = await preExecute(w, { agent, name: "run_code", parent: undefined, arguments: {} });
+    check("outer run_code transport still delegates", outer.claimed === false);
+    const innerRead = await preExecute(w, { agent, name: "read", parent: "run_code", arguments: {} });
+    check("PTC inner read delegates (out of scope)", innerRead.claimed === false);
+    const innerEdit = await preExecute(w, { agent, name: "edit", parent: "run_code", arguments: {} });
+    check("PTC inner edit is judged (in scope)", innerEdit.claimed === true);
+  }
+
   console.log("\n" + (failures === 0 ? "all " + checks + " checks passed" : failures + " of " + checks + " checks FAILED"));
   process.exit(failures === 0 ? 0 : 1);
 }

@@ -214,10 +214,61 @@ const REVIEW_PRESET_NAME = "agent-review";
 const REVIEW_BASE_MODE = "danger-full-access";
 /**
  * The outer PTC transport tool name — deliberately EXCLUDED from per-call
- * review (aligned with the official auto-review scope); every native call
- * and every started PTC inner call IS reviewed.
+ * review (aligned with the official auto-review scope). Its INNER calls are
+ * ordinary tools and are judged on their own merits by `reviewScopeCovers`.
  */
 const RUN_CODE_TOOL = "run_code";
+
+/**
+ * Per-call review SCOPE (user ruling 2026-10-01): only the tools that can
+ * actually change the machine are judged by Jev. Everything else —
+ * `read`/`read_image`/`glob`/`grep`/`web_*`/`todo_write`/`present`/the
+ * inspection tools and the rest — passes through untouched, with no Jev
+ * round-trip and no audit row.
+ *
+ * Rationale: the reviewed set is Turing-complete by itself (bash/pwsh can
+ * delete files, curl, rewrite config), so leaving another tool out does not
+ * open a new attack surface — this is a COST decision, not a security one.
+ * The overwhelming majority of calls in a session are reads, and spending a
+ * Jev call plus an audit entry on each is pure overhead.
+ *
+ * SCOPE POLICY (user ruling 2026-10-01). Three tiers, in full:
+ *   1. Core DSH tools — enumerated above. Judged.
+ *   2. MCP tools — `mcp__*`, judged. Also third-party in origin, but they
+ *      are user-attached servers whose whole value is acting on the machine,
+ *      and the prefix is stable, so they are a deliberate superset of the
+ *      policy below.
+ *   3. Everything else, INCLUDING tools added by third-party plugins
+ *      (e.g. a dsh-im style file-delivery tool) — NOT judged, and the user
+ *      owns that surface. Plugins add and drop tools at will, so an
+ *      allowlist can never track them; chasing them would mean either a
+ *      maintenance treadmill or a false sense of coverage.
+ *
+ * If a CORE DSH tool ever becomes write/execute/transmit-capable and is not
+ * listed above, it needs adding here — the core set is stable and knowable.
+ */
+const REVIEW_SCOPE_TOOLS = new Set([
+  "bash", // dsh-tool-bash + dsh-tool-bash-persistent register the SAME name
+  "pwsh", // dsh-tool-pwsh + dsh-tool-pwsh-persistent register the SAME name
+  "write", // dsh-tool-fs
+  "edit", // dsh-tool-fs
+  "str_replace_editor", // dsh-tool-str-replace-editor (easy to forget)
+]);
+
+/**
+ * Tool-name prefixes in scope. `mcp__<server>__<tool>` is exactly what
+ * dsh-mcp-client's `publicToolName` produces — two underscores, not one.
+ */
+const REVIEW_SCOPE_PREFIXES = ["mcp__"];
+
+/** Whether the per-call reviewer judges this pending tool call. */
+function reviewScopeCovers(name) {
+  if (REVIEW_SCOPE_TOOLS.has(name)) return true;
+  for (const prefix of REVIEW_SCOPE_PREFIXES) {
+    if (name.startsWith(prefix)) return true;
+  }
+  return false;
+}
 /** Structured error identity shown on a final review denial tool card. */
 const REVIEW_DENIED_NAME = "AgentReviewDeniedError";
 const REVIEW_DENIED_CODE = "AGENT_REVIEW_DENIED";
@@ -759,7 +810,7 @@ export class AgentApprovalService extends TypertRemoteService {
           if (entry === undefined) return "";
           if (entry.mode === "review") {
             return (
-              "Per-call review mode (自动审查) is ON for this session: the sandbox base is danger-full-access, and EVERY tool call is reviewed by the Jev judge before execution. The judge sees the exact tool call and the user's actual request; risky, destructive, out-of-scope, or dishonest calls are rejected outright and their body never runs — a rejection is FINAL (no human fallback). State the exact target of each operation and its link to the task."
+              "Per-call review mode (自动审查) is ON for this session: the sandbox base is danger-full-access, and the tools that change the machine — bash, pwsh, write, edit, str_replace_editor and MCP tools (mcp__*) — are each reviewed by the Jev judge before execution. Read-only tools (read/glob/grep/web_fetch/...) are NOT reviewed and run unattended. The judge sees the exact tool call and the user's actual request; risky, destructive, out-of-scope, or dishonest calls are rejected outright and their body never runs — a rejection is FINAL (no human fallback). Note that bash/pwsh can do anything any unreviewed tool could, so routing around the judge by switching tools achieves nothing: state the exact target of each operation and its link to the task."
             );
           }
           const route = " routed to " + this._judgeRoute().label;
@@ -2171,8 +2222,11 @@ export class AgentApprovalService extends TypertRemoteService {
    * everything else delegates via `next()` OUTSIDE any try/catch (a failure
    * deeper in the chain keeps its own semantics). Coverage mirrors the
    * official auto-review: every native call and every started PTC inner call
-   * (`exec.parent`), with the outer `run_code` transport deliberately
-   * excluded. Denials are FINAL (fail-closed, no human fallback — user
+   * (`exec.parent`) reaches this listener, with the outer `run_code`
+   * transport deliberately excluded. SCOPE (user ruling 2026-10-01): only
+   * the tools in `REVIEW_SCOPE_TOOLS` / `REVIEW_SCOPE_PREFIXES` are claimed;
+   * reads and other side-effect-free tools delegate immediately, costing
+   * nothing. Denials are FINAL (fail-closed, no human fallback — user
    * ruling 2026-10): reject, low confidence, timeout and infrastructure
    * faults all deny the call without executing its body.
    */
@@ -2185,6 +2239,8 @@ export class AgentApprovalService extends TypertRemoteService {
       if (exec.parent === undefined && String(exec.name) === RUN_CODE_TOOL) return await next();
       const entry = this._enabled.get(s.id);
       if (entry === undefined || entry.mode !== "review") return await next();
+      // Scope narrowing: only write / execute / transmit tools are judged.
+      if (!reviewScopeCovers(String(exec.name))) return await next();
       session = s;
     } catch (e) {
       // A broken claim check must not fail closed for the (vast majority)

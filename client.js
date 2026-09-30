@@ -850,7 +850,7 @@ window.__ModuleLoader__.load({
             h(
               "div",
               { className: "aapr-muted" },
-              "自动审查是独立的第二种权限模式，与上面的自动审批互不相关：它不看提权，而是以 danger-full-access 为基线，对每个工具调用（含 PTC 内层调用，外层 run_code 传输除外）在执行前用 TypeSafe Jev 判定一次——风险调用直接拒绝、body 不执行、不转人工（fail-closed，拒绝即最终结论）。",
+              "自动审查是独立的第二种权限模式，与上面的自动审批互不相关：它不看提权，而是以 danger-full-access 为基线，对**能改动机器的工具**——bash、pwsh、write、edit、str_replace_editor 以及 MCP 工具（mcp__*，含 PTC 内层调用，外层 run_code 传输除外）——在执行前用 TypeSafe Jev 判定一次，风险调用直接拒绝、body 不执行、不转人工（fail-closed，拒绝即最终结论）。只读工具（read / glob / grep / web_fetch 等）不参与审查，直接执行。",
               h("br", null),
               "Jev 是结构化决策模型（System One）：直连 TypeSafe API，不创建审批子会话，毫秒级返回带校准概率的裁决。审计「理由」由概率分布合成（Jev 本身不生成文字）；置信度低于阈值时按 fail-closed 处理（记 unavailable，不放行也不记拒绝）。对中文任务上下文的准确率略低于英语。API Key 明文保存在本机 config.json；留空时使用环境变量 TYPESAFE_API_KEY。",
               h("br", null),
