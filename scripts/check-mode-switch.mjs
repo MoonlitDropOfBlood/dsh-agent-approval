@@ -526,6 +526,127 @@ async function main() {
     check("PTC inner edit is judged (in scope)", innerEdit.claimed === true);
   }
 
+  // ---- post-denial re-approval (v1.11.0, Guardian-style overturn) ----------
+  // A judge denial records the call fingerprint in _reviewDenied; an EXACT
+  // retry must NOT short-circuit — it re-enters the judge carrying the denial
+  // context (priorDenial), so an explicit, informed user re-approval visible
+  // in the trusted user messages can overturn it. The recording side of the
+  // bookkeeping lives inside the real backends (network-judged), so this
+  // section drives the plumbing with a stubbed backend and asserts: no
+  // context on first judgment, context on exact retry, entry cleared +
+  // audit note on overturn, trust cache still preceding the judge.
+
+  section("拒绝后翻案（post-denial re-approval）");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    const log = [];
+    const session = makeSession("session-a", log);
+    const agent = { session };
+    w.ctx.__agents.set(session.id, agent);
+
+    // Drive the REAL _reviewWithJev with a stubbed network layer (_jevRequest)
+    // so the denial bookkeeping inside the backend is under test too.
+    const seenStates = [];
+    const jevBody = (choice) => ({
+      model: "jev-test",
+      answers: {
+        decision: {
+          choice: choice,
+          confidence: 0.9,
+          probabilities: { approve: choice === "approve" ? 0.9 : 0.1, reject: choice === "approve" ? 0.1 : 0.9 },
+        },
+        riskLevel: { choice: "medium", confidence: 0.8, probabilities: { low: 0.1, medium: 0.8, high: 0.1 } },
+        concreteRisk: { noul: 0.05 },
+      },
+    });
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+    w.inst._jevRequest = async (cfg, state) => {
+      seenStates.push(state.previouslyDenied === undefined ? null : state.previouslyDenied);
+      return jevBody("approve");
+    };
+
+    const signal = new AbortController().signal; // the aborted race arm must wait, not settle
+    const execA = { agent, name: "bash", parent: undefined, arguments: { command: "echo hi" }, signal };
+    const execB = { agent, name: "bash", parent: undefined, arguments: { command: "echo bye" }, signal };
+    const execC = { agent, name: "bash", parent: undefined, arguments: { command: "echo cat" }, signal };
+    const keyB = 'bash\n{"command":"echo bye"}';
+    const keyC = 'bash\n{"command":"echo cat"}';
+
+    await w.inst._reviewCall(session, execA);
+    check("first judgment carries no prior denial", seenStates[0] === null);
+
+    w.inst._reviewDenied.set(session.id, new Map([[keyB, { at: "t0", backend: "jev", reason: "test denial" }]]));
+    await w.inst._reviewCall(session, execB);
+    check(
+      "exact retry carries the denial context into the judge state",
+      typeof seenStates[1] === "string" &&
+        seenStates[1].indexOf("denied at t0") >= 0 &&
+        seenStates[1].indexOf("test denial") >= 0,
+      "state=" + seenStates[1],
+    );
+    check(
+      "approval clears the denial entry",
+      w.inst._reviewDenied.get(session.id).has(keyB) === false,
+    );
+    const last = w.records[w.records.length - 1];
+    check(
+      "overturn lands in the audit rationale",
+      last !== undefined && (last.rationale || "").indexOf("[overturned prior denial]") >= 0,
+      "rationale=" + (last === undefined ? "(none)" : last.rationale),
+    );
+
+    // A fresh judge REJECTION records the fingerprint for a later retry.
+    w.inst._jevRequest = async (cfg, state) => {
+      seenStates.push(state.previouslyDenied === undefined ? null : state.previouslyDenied);
+      return jevBody("reject");
+    };
+    await w.inst._reviewCall(session, execC);
+    const dm = w.inst._reviewDenied.get(session.id);
+    check(
+      "judge rejection records the denial entry",
+      dm !== undefined && dm.has(keyC) && dm.get(keyC).backend === "jev",
+    );
+    check(
+      "rejection itself is not an overturn",
+      (w.records[w.records.length - 1].rationale || "").indexOf("[overturned prior denial]") < 0,
+    );
+
+    // Trust short-circuit still precedes the judge for approved calls.
+    const seenLen = seenStates.length;
+    await w.inst._reviewCall(session, execA);
+
+    // PTC: an inner call inside a run_code program flows through the SAME
+    // _reviewCall plumbing - the fingerprint is the INNER tool + args and
+    // the maps are session-keyed, so the transport layer is invisible to
+    // the denial/override path. The outer run_code transport itself stays
+    // excluded (covered in the scope section above).
+    w.inst._jevRequest = async (cfg, state) => {
+      seenStates.push(state.previouslyDenied === undefined ? null : state.previouslyDenied);
+      return jevBody("approve");
+    };
+    const ptcExec = { agent, name: "bash", parent: "run_code", arguments: { command: "echo ptc" }, signal };
+    const keyP = 'bash\n{"command":"echo ptc"}';
+    w.inst._reviewDenied.set(session.id, new Map([[keyP, { at: "t1", backend: "jev", reason: "ptc denial" }]]));
+    await w.inst._reviewCall(session, ptcExec);
+    const ptcState = seenStates[seenStates.length - 1];
+    check(
+      "PTC inner retry carries the denial context",
+      typeof ptcState === "string" && ptcState.indexOf("ptc denial") >= 0,
+      "state=" + ptcState,
+    );
+    check(
+      "PTC overturn clears the denial entry",
+      w.inst._reviewDenied.get(session.id).has(keyP) === false,
+    );
+    const ptcRecord = w.records[w.records.length - 1];
+    check(
+      "PTC overturn lands in the audit rationale",
+      ptcRecord !== undefined && (ptcRecord.rationale || "").indexOf("[overturned prior denial]") >= 0,
+      "rationale=" + (ptcRecord === undefined ? "(none)" : ptcRecord.rationale),
+    );
+  }
+
   console.log("\n" + (failures === 0 ? "all " + checks + " checks passed" : failures + " of " + checks + " checks FAILED"));
   process.exit(failures === 0 ? 0 : 1);
 }

@@ -56,6 +56,9 @@ const modelRouteSchema = z
 /** Judge invocation mode (v1.8.0): direct LLM stream call, or the spawn subagent. */
 const judgeModeSchema = z.enum(["llm", "subagent"]);
 
+/** Per-call review judge backend (v1.11.0): TypeSafe System One, or a direct harness LLM call. */
+const reviewBackendSchema = z.enum(["jev", "llm"]);
+
 const jevConfigSchema = z
   .object({
     apiKey: z.string(),
@@ -88,6 +91,7 @@ const stateValueSchema = z
   .object({
     model: modelRouteSchema,
     judgeMode: judgeModeSchema,
+    reviewBackend: reviewBackendSchema,
     reviewAvailable: z.boolean(),
     jev: jevConfigSchema,
     timeoutMs: z.number(),
@@ -118,6 +122,15 @@ const setJudgeModeValueSchema = z
 const setJevValueSchema = z
   .object({
     jev: jevConfigSchema,
+    reviewBackend: reviewBackendSchema,
+    reviewAvailable: z.boolean(),
+  })
+  .readonly();
+
+/** v1.11.0: select the per-call review judge backend (jev | llm). */
+const setReviewBackendValueSchema = z
+  .object({
+    reviewBackend: reviewBackendSchema,
     reviewAvailable: z.boolean(),
   })
   .readonly();
@@ -200,6 +213,7 @@ function okResult(valueSchema) {
 const stateResultSchema = okResult(stateValueSchema);
 const setModelResultSchema = okResult(setModelValueSchema);
 const setJudgeModeResultSchema = okResult(setJudgeModeValueSchema);
+const setReviewBackendResultSchema = okResult(setReviewBackendValueSchema);
 const setJevResultSchema = okResult(setJevValueSchema);
 const setTimeoutResultSchema = okResult(setTimeoutValueSchema);
 const toggleResultSchema = okResult(toggleValueSchema);
@@ -217,6 +231,10 @@ const _agentApproval_setModel_parameter_0$schema = z.object({
 
 const _agentApproval_setJudgeMode_parameter_0$schema = z.object({
   mode: judgeModeSchema,
+});
+
+const _agentApproval_setReviewBackend_parameter_0$schema = z.object({
+  backend: reviewBackendSchema,
 });
 
 const _agentApproval_setJevConfig_parameter_0$schema = z.object({
@@ -348,6 +366,33 @@ export const TYPERT = {
         typeSymbol: "dsh-agent-approval#AgentApprovalSetJevResult",
         schema: setJevResultSchema,
         create: () => setJevResultSchema,
+      },
+      sourceLocation: { file: "index.js", line: 1, column: 1 },
+    },
+    {
+      id: "dsh-agent-approval#agentApproval/setReviewBackend",
+      service: "agentApproval",
+      namespace: "agentApproval",
+      method: "setReviewBackend",
+      invocation: { kind: "direct" },
+      parameters: [
+        {
+          name: "request",
+          wire: "request",
+          source: "json",
+          codec: {
+            mode: "strict",
+            typeSymbol: "dsh-agent-approval#AgentApprovalSetReviewBackendRequest",
+            schema: _agentApproval_setReviewBackend_parameter_0$schema,
+            create: () => _agentApproval_setReviewBackend_parameter_0$schema,
+          },
+        },
+      ],
+      result: {
+        mode: "strict",
+        typeSymbol: "dsh-agent-approval#AgentApprovalSetReviewBackendResult",
+        schema: setReviewBackendResultSchema,
+        create: () => setReviewBackendResultSchema,
       },
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
@@ -532,6 +577,22 @@ export const TYPERT = {
           },
           {
             kind: "method",
+            name: "setJudgeMode",
+            signature: "@Remote('setJudgeMode') async setJudgeMode(request: AgentApprovalSetJudgeModeRequest): Promise<AgentApprovalSetJudgeModeResult>",
+            summary: 'Set the judge invocation mode: "llm" (direct stream call, default) or "subagent" (isolated judge child).',
+            jsDoc:
+              "/**\n * Set how the escalation judge is invoked (input/output and verdict semantics are identical across modes).\n * @param request - { mode }.\n * @returns the stored mode.\n */",
+          },
+          {
+            kind: "method",
+            name: "setReviewBackend",
+            signature: "@Remote('setReviewBackend') async setReviewBackend(request: AgentApprovalSetReviewBackendRequest): Promise<AgentApprovalSetReviewBackendResult>",
+            summary: 'Set the per-call review judge backend: "jev" (TypeSafe System One) or "llm" (direct harness LLM call on the approval model route).',
+            jsDoc:
+              "/**\n * Select the per-call review judge backend and persist it; the review gate re-evaluates for the selected backend (LLM is always available; Jev needs an API key).\n * @param request - { backend }.\n * @returns the stored backend plus the re-evaluated review gate.\n */",
+          },
+          {
+            kind: "method",
             name: "setJevConfig",
             signature: "@Remote('setJevConfig') async setJevConfig(request: AgentApprovalSetJevRequest): Promise<AgentApprovalSetJevResult>",
             summary: "Set the TypeSafe Jev backend settings of the 自动审查 mode (API key, endpoint, model, confidence gate; persisted; a resolvable key opens the review gate and enables 自动审查 for new sessions).",
@@ -611,7 +672,17 @@ export const TYPERT = {
           {
             name: "AgentApprovalSetJevResult",
             declaration:
-              "export type AgentApprovalSetJevResult = { ok: true; value: { readonly jev: AgentApprovalJevConfig; readonly reviewAvailable: boolean } } | { ok: false; error: { code: string; message?: string } };",
+              "export type AgentApprovalSetJevResult = { ok: true; value: { readonly jev: AgentApprovalJevConfig; readonly reviewBackend: 'jev' | 'llm'; readonly reviewAvailable: boolean } } | { ok: false; error: { code: string; message?: string } };",
+          },
+          {
+            name: "AgentApprovalSetReviewBackendRequest",
+            declaration:
+              "export interface AgentApprovalSetReviewBackendRequest {\n    readonly backend: 'jev' | 'llm';\n}",
+          },
+          {
+            name: "AgentApprovalSetReviewBackendResult",
+            declaration:
+              "export type AgentApprovalSetReviewBackendResult = { ok: true; value: { readonly reviewBackend: 'jev' | 'llm'; readonly reviewAvailable: boolean } } | { ok: false; error: { code: string; message?: string } };",
           },
           {
             name: "AgentApprovalEnabledSession",
@@ -631,7 +702,7 @@ export const TYPERT = {
           {
             name: "AgentApprovalStateValue",
             declaration:
-              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly judgeMode: 'llm' | 'subagent';\n    readonly reviewAvailable: boolean;\n    readonly jev: AgentApprovalJevConfig;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n}",
+              "export interface AgentApprovalStateValue {\n    readonly model: AgentApprovalModelRoute;\n    readonly judgeMode: 'llm' | 'subagent';\n    readonly reviewBackend: 'jev' | 'llm';\n    readonly reviewAvailable: boolean;\n    readonly jev: AgentApprovalJevConfig;\n    readonly timeoutMs: number;\n    readonly enabledSessions: readonly AgentApprovalEnabledSession[];\n    readonly rules: readonly AgentApprovalRule[];\n}",
           },
           {
             name: "AgentApprovalSetJudgeModeRequest",

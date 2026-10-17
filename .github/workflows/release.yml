@@ -91,12 +91,18 @@ jobs:
 
             dsh-agent-approval — DeepSeek Harness Agent 审批权限插件。
 
+            ### v1.11.0 亮点（审批标准对齐 Codex / Guardian）
+            - **自动审查支持 LLM 判定后端**：设置页「自动审查」卡片新增判定后端下拉（TypeSafe Jev / LLM）。LLM 后端与自动审批共用「审批模型」路由，无需 Jev Key；两后端共用规则表、信任缓存、effectiveCode 展开与同一套 fail-closed 语义。
+            - **审批标准 Guardian 化**：裁决提示词与 Jev criteria 重构为四段式——证据信任分级（用户/开发者消息可信，工具输出/文件内容不可信）→ 授权评分 → 风险 taxonomy（含反误杀校准）→ outcome 矩阵。两条裁决路径同一把尺子。
+            - **拒绝后翻案（Guardian post-denial 规则）**：判定驳回不再是绝对终局——用户知情后明确重批，同一调用原样重试即可翻案（审计 [overturned prior denial]）；明显秘密外发/大规模不可逆破坏仍不可翻案；改写调用绕审查视为 dishonest。
+            - 审批标准逆向依据见仓库 docs/codex-approval-standards.md。
+
             ### 功能
             - 新权限模式：workspace-write 基线 + 每一次沙箱提权都由模型自动裁决，不弹人工审批。
             - 裁决器是一次 LLM 直连（默认，零子会话），也可切换为隔离的审批子代理。
-            - 独立的「自动审查」模式：Full access 基线下每个工具调用执行前经 TypeSafe Jev 判定一次，风险调用直接拒绝、不转人工。
+            - 独立的「自动审查」模式：Full access 基线下每个能改动机器的工具调用执行前经判定器（TypeSafe Jev 或 LLM）判定一次，风险调用直接拒绝。
             - 风险操作直接拒绝；超时/故障一律 fail-closed（按拒绝处理），绝不静默放行。
-            - 设置面板把两种模式分开配置：上半配置审批模型 / 裁决方式 / 超时与放行-拒绝规则，下半配置自动审查的 Jev（配置即启用）；会话经 /permission 菜单或 /agent-approval、/agent-review 命令开关，每次裁决在会话窗口「审批」标签页留痕。
+            - 设置面板把两种模式分开配置：上半配置审批模型 / 裁决方式 / 超时与放行-拒绝规则，下半配置自动审查的判定后端与 Jev 配置；会话经 /permission 菜单或 /agent-approval、/agent-review 命令开关，每次裁决在会话窗口「审批」标签页留痕。
 
             ### 📦 安装（标准 DSH bundle）
             ```bash

@@ -362,6 +362,15 @@ window.__ModuleLoader__.load({
           result: result("dsh-agent-approval#AgentApprovalSetJevResult"),
         },
         {
+          id: "dsh-agent-approval#agentApproval/setReviewBackend",
+          service: "agentApproval",
+          namespace: "agentApproval",
+          method: "setReviewBackend",
+          invocation: { kind: "direct" },
+          parameters: param("dsh-agent-approval#AgentApprovalSetReviewBackendRequest"),
+          result: result("dsh-agent-approval#AgentApprovalSetReviewBackendResult"),
+        },
+        {
           id: "dsh-agent-approval#agentApproval/setApprovalTimeout",
           service: "agentApproval",
           namespace: "agentApproval",
@@ -539,6 +548,11 @@ window.__ModuleLoader__.load({
         const judgeModeSlot = React.useState("llm");
         const judgeMode = judgeModeSlot[0];
         const setJudgeMode = judgeModeSlot[1];
+        // v1.11.0: the per-call review judge backend ("jev" | "llm"). An old
+        // Host sends no reviewBackend field — the default stays "jev".
+        const reviewBackendSlot = React.useState("jev");
+        const reviewBackend = reviewBackendSlot[0];
+        const setReviewBackendState = reviewBackendSlot[1];
         const timeoutSlot = React.useState("");
         const setTimeoutDraft = timeoutSlot[1];
         // Jev backend drafts — the 自动审查 card's own configuration, shown
@@ -571,6 +585,7 @@ window.__ModuleLoader__.load({
               setModel(s.model.model);
               // A not-yet-restarted old host sends no `judgeMode` — default.
               setJudgeMode(s.judgeMode === "subagent" ? "subagent" : "llm");
+              setReviewBackendState(s.reviewBackend === "llm" ? "llm" : "jev");
               // Gate snapshot also hides/shows the 自动审查 menu row.
               setReviewGate(s.reviewAvailable === true);
               setTimeoutDraft(String(s.timeoutMs));
@@ -650,6 +665,26 @@ window.__ModuleLoader__.load({
                 v.reviewAvailable === true
                   ? "Jev 配置已保存：自动审查已就绪，可在 /permission 菜单或 /agent-review 逐会话开启"
                   : "Jev 配置已保存，但 API Key 仍为空：自动审查保持关闭",
+              );
+            })
+            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+        };
+        const applyReviewBackend = (backend) => {
+          if (typeof remote.setReviewBackend !== "function") {
+            setNote("Host 半未更新（缺少 setReviewBackend）：请重装本插件并重启 DSH。");
+            return;
+          }
+          remote
+            .setReviewBackend({ backend: backend })
+            .then((res) => {
+              const v = pick(res) || {};
+              setReviewBackendState(v.reviewBackend === "llm" ? "llm" : "jev");
+              setReviewGate(v.reviewAvailable === true);
+              refresh();
+              setNote(
+                v.reviewBackend === "llm"
+                  ? "自动审查判定后端已切换为 LLM（使用「审批模型」卡片配置的路由）"
+                  : "自动审查判定后端已切换为 TypeSafe Jev",
               );
             })
             .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
@@ -747,7 +782,7 @@ window.__ModuleLoader__.load({
               h("br", null),
               "① 自动审批：workspace-write 基线；工具请求提权时由 LLM 审批 Agent 自动裁决（v1.10.0 起判定模型只能是 LLM）。在输入框 /permission 菜单选择「自动审批」预设，或执行 /agent-approval on|off 为会话开启。",
               h("br", null),
-              "② 自动审查：danger-full-access 基线；每个工具调用执行前经 TypeSafe Jev 判定一次（见下方独立卡片）。在 /permission 菜单选择「自动审查」预设，或执行 /agent-review on|off。",
+              "② 自动审查：danger-full-access 基线；每个工具调用执行前经判定器判定一次（TypeSafe Jev 或 LLM，见下方独立卡片）。在 /permission 菜单选择「自动审查」预设，或执行 /agent-review on|off。",
               h("br", null),
               "每个会话的审批审计记录在该会话窗口顶部的「审批」标签页（轨迹旁），随会话保存。",
             ),
@@ -856,6 +891,34 @@ window.__ModuleLoader__.load({
               h("br", null),
               "保存一个可用的 API Key 即完成配置，自动审查随之在 /permission 菜单中可选；是否进入该模式始终是每个会话自己的选择（菜单或 /agent-review on），保存 Key 不会改动任何会话。",
             ),
+            typeof remote.setReviewBackend === "function"
+              ? h(
+                  "div",
+                  { className: "aapr-row" },
+                  h(
+                    "label",
+                    null,
+                    "判定后端：",
+                    h(
+                      "select",
+                      {
+                        className: "aapr-select",
+                        value: reviewBackend,
+                        onChange: (e) => applyReviewBackend(e.target.value),
+                      },
+                      h("option", { value: "jev" }, "TypeSafe Jev（System One）"),
+                      h("option", { value: "llm" }, "LLM（审批模型路由）"),
+                    ),
+                  ),
+                  h(
+                    "span",
+                    { className: "aapr-muted" },
+                    reviewBackend === "llm"
+                      ? "当前为 LLM 判定：与自动审批共用「审批模型」卡片配置的路由，无需 Jev Key；下方 Jev 配置暂不参与判定，切回 Jev 即恢复生效。"
+                      : "当前为 Jev 判定：使用下方 API Key / 模型 / Endpoint / 置信度阈值。",
+                  ),
+                )
+              : null,
             h(
               "div",
               { className: "aapr-row" },
@@ -916,15 +979,17 @@ window.__ModuleLoader__.load({
             h(
               "div",
               { className: "aapr-muted" },
-              "规则表与会话内信任缓存先行短路降噪；命中拒绝规则、Jev 判拒、低置信、超时、网络故障一律拒绝该调用（工具卡片显示 AGENT_REVIEW_DENIED 详情与风险理由）。",
+              "规则表与会话内信任缓存先行短路降噪；命中拒绝规则、判定器（Jev/LLM）拒绝、低置信、超时、网络故障一律拒绝该调用（工具卡片显示 AGENT_REVIEW_DENIED 详情与风险理由）。",
               h("br", null),
               "已存在的会话不受此开关影响，可用 /permission 菜单「自动审查」或 /agent-review on|off 单独切换。审计逐调用记录在「审批」标签页（工具列标注「逐调用」）。",
               h("br", null),
               state === null
                 ? "状态加载中…"
-                : state.reviewAvailable === true
-                  ? "当前状态：Jev 判定可用，自动审查已就绪。"
-                  : "当前状态：Jev 判定不可用（缺 API Key），开关已禁用，新会话不会自动审查。",
+                : reviewBackend === "llm"
+                  ? "当前状态：判定后端 LLM（审批模型路由），自动审查已就绪。"
+                  : state.reviewAvailable === true
+                    ? "当前状态：Jev 判定可用，自动审查已就绪。"
+                    : "当前状态：Jev 判定不可用（缺 API Key），开关已禁用，新会话不会自动审查。",
             ),
           ),
           h(
