@@ -88,13 +88,15 @@ window.__ModuleLoader__.load({
 [data-dsh-agent-approval-settings-nav]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat}
 
 /* /permission menu + composer permission trigger: both pick icons from the
-   permissionGlyphs map compiled into the official dsh-client-ui-conversation
-   bundle ("host-configured names outside the design set get none") — there is
-   no public registration seam, so an external preset row renders with no icon
-   element at all. registerPermissionGlyphIcon marks the Agent 审批 menu row
-   ([role=menu] button[role=menuitem]) and the composer trigger button; CSS
-   draws the same shield + AI-star glyph patch-glyph.mjs used, as a
-   currentColor mask so hover/selected/disabled colors all follow the shell.
+   permissionGlyphs map compiled into the official client bundle (the Menu
+   lives in dsh-client-ui-permission-presets since 0.1.7-rc.1; before that,
+   dsh-client-ui-conversation) — "host-configured names outside the design
+   set get none", and there is no public registration seam, so an external
+   preset row renders with no icon element at all. registerPermissionGlyphIcon
+   marks the 自动审批 menu row ([role=menu] button[role=menuitem]) and the
+   composer trigger button; CSS draws the same shield + AI-star glyph
+   patch-glyph.mjs used, as a currentColor mask so hover/selected/disabled
+   colors all follow the shell.
    Scope guard: only menus that already render the official glyph set
    (sibling rows carry the Menu primitive's itemIcon span) qualify — the composer /permission
    menu does; the settings PermissionRow dropdown (settings.general 权限 row,
@@ -103,13 +105,29 @@ window.__ModuleLoader__.load({
 [data-dsh-agent-approval-perm-item]::before,
 [data-dsh-agent-approval-perm-trigger]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat}
 
-/* 自动审查 (agent-review) menu row: same shield-glyph treatment as the
-   自动审批 row (same glyph-set guard), and hidden outright while the Jev gate
-   is closed (body[data-...-review-gate="off"], set from getState()
-   .reviewAvailable) — the mode cannot run without the Jev judge, so the host
-   would bounce the selection back anyway. */
+/* 自动审查 (agent-review) row + trigger: v1.11.3 stops reusing the 自动审批
+   shield and gives the review mode its own glyph — Lucide "search-check"
+   (magnifier + tick: inspected & passed), drawn on the 16px box over the
+   24px Lucide grid so stroke-width 2 renders at ≈1.33px, the same optical
+   weight as the hand-drawn 16px shield above (1.31831). The composer trigger
+   carries a SEPARATE marker (…-review-trigger) set only while 自动审查 is
+   the currently selected preset, so the trigger glyph follows the active
+   mode instead of always showing the shield.
+   Collision note (v1.11.3): the host's experimental auto-review preset
+   (value "auto") is ALSO labelled 自动审查 (locale t("auto.label")) AND has
+   a native permissionGlyphs icon (PermissionIconAutoReviewRegular, keyed by
+   the preset VALUE). The marker logic therefore refuses any surface that
+   already renders the host's glyph (triggerIcon span on triggers; itemIcon
+   svg on menu rows) — the host's own row/trigger keeps exactly its one
+   native icon instead of stacking ours in front of it.
+   The row is also hidden outright while the Jev gate is closed
+   (body[data-...-review-gate="off"], set from getState().reviewAvailable) —
+   the mode cannot run without the Jev judge, so the host would bounce the
+   selection back anyway. The gate rule must stay scoped to the ROW marker:
+   display:none on the trigger would swallow the whole permission selector. */
 [data-dsh-agent-approval-review-gate="off"] [data-dsh-agent-approval-review-item]{display:none}
-[data-dsh-agent-approval-review-item]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z' stroke='black' stroke-width='1.31831' stroke-linejoin='round'/%3E%3Cpath d='M8 3.2L9.1 5.9L11.8 7L9.1 8.1L8 10.8L6.9 8.1L4.2 7L6.9 5.9Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat}
+[data-dsh-agent-approval-review-item]::before,
+[data-dsh-agent-approval-review-trigger]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m8 11 2 2 4-4'/%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m8 11 2 2 4-4'/%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E") center/contain no-repeat}
 .aapr-mode-review{display:inline-block;margin:2px 0 2px 6px;padding:1px 6px;font-size:10px;line-height:1.5;border:1px solid var(--dsw-alias-border-l2);border-radius:4px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);white-space:nowrap;vertical-align:1px}
 `;
 
@@ -163,6 +181,10 @@ window.__ModuleLoader__.load({
     // above can paint the glyph; the disposer clears both markers.
     const PERM_ITEM_MARKER = "data-dsh-agent-approval-perm-item";
     const PERM_TRIGGER_MARKER = "data-dsh-agent-approval-perm-trigger";
+    // v1.11.3: the composer trigger gets a marker PER selected preset name, so
+    // the CSS can paint the shield while 自动审批 is active and the dedicated
+    // search-check glyph while 自动审查 is (both defined in the style block).
+    const REVIEW_TRIGGER_MARKER = "data-dsh-agent-approval-review-trigger";
 
     function registerPermissionGlyphIcon(label) {
       let disposed = false;
@@ -209,22 +231,43 @@ window.__ModuleLoader__.load({
         //    are equally ours, and neither is in the host's permissionGlyphs —
         //    registerReviewMenuItem only marks menu rows, so without this the
         //    trigger showed 自动审查 with no icon at all.
-        const triggerLabels = [currentLabel, String(REVIEW_LABEL).trim()];
+        //    v1.11.3 collision guard: the host's experimental auto-review
+        //    preset (value "auto") is ALSO labelled 自动审查 (locale
+        //    t("auto.label")) AND has a native permissionGlyphs icon
+        //    (PermissionIconAutoReviewRegular, keyed by the preset VALUE) —
+        //    with it selected, the official trigger renders its triggerIcon
+        //    span and our injected mask used to stack in front of it (two
+        //    icons before the label). Guard: never mark a trigger that already
+        //    renders `span[class*="triggerIcon"] svg` — the span only exists
+        //    when the selected preset's VALUE is in permissionGlyphs, which is
+        //    never true for our presets, so the guard cannot block our own
+        //    surfaces. The surviving matches set DIFFERENT markers per label
+        //    so the glyph follows the active mode (shield / search-check).
+        const reviewLabel = String(REVIEW_LABEL).trim();
         const buttons = document.querySelectorAll("button");
         for (let i = 0; i < buttons.length; i++) {
           const button = buttons[i];
           if (button.getAttribute("role") === "menuitem") continue;
           if (button.closest('[role="dialog"]') !== null) continue;
           if (button.hasAttribute(SETTINGS_NAV_MARKER)) continue;
+          const officialGlyph = button.querySelector('span[class*="triggerIcon"] svg') !== null;
           const spans = button.querySelectorAll(":scope > span");
           let labelText = "";
           for (let j = 0; j < spans.length; j++) {
             const s = spans[j].textContent ? spans[j].textContent.trim() : "";
             if (s.length > 0) { labelText = s; break; }
           }
-          const matches = triggerLabels.indexOf(labelText) !== -1 && button.querySelector("svg") !== null;
-          if (matches) button.setAttribute(PERM_TRIGGER_MARKER, "");
-          else button.removeAttribute(PERM_TRIGGER_MARKER);
+          let marker = "";
+          if (!officialGlyph && labelText.length > 0 && button.querySelector("svg") !== null) {
+            if (labelText === currentLabel) marker = PERM_TRIGGER_MARKER;
+            else if (reviewLabel.length > 0 && labelText === reviewLabel) marker = REVIEW_TRIGGER_MARKER;
+          }
+          if (marker.length > 0) {
+            button.setAttribute(marker, "");
+          } else {
+            button.removeAttribute(PERM_TRIGGER_MARKER);
+            button.removeAttribute(REVIEW_TRIGGER_MARKER);
+          }
         }
       };
       sync();
@@ -233,7 +276,7 @@ window.__ModuleLoader__.load({
       return function () {
         disposed = true;
         observer.disconnect();
-        const names = [PERM_ITEM_MARKER, PERM_TRIGGER_MARKER];
+        const names = [PERM_ITEM_MARKER, PERM_TRIGGER_MARKER, REVIEW_TRIGGER_MARKER];
         for (let n = 0; n < names.length; n++) {
           const marked = document.querySelectorAll("[" + names[n] + "]");
           for (let i = 0; i < marked.length; i++) marked[i].removeAttribute(names[n]);
@@ -247,6 +290,13 @@ window.__ModuleLoader__.load({
     // the review mode cannot run without the Jev judge, so offering the row
     // would only bounce the user back (the host-side gate fallback keeps them
     // safe either way). Gate snapshot comes from getState().reviewAvailable.
+    // v1.11.3 row guard: refuse rows that already render the Menu primitive's
+    // official itemIcon svg. Today the host's experimental auto preset row is
+    // labelled 自动审查 + EXP badge ("自动审查EXP"), so the exact-equality
+    // text match already skips it — the guard keeps that true even if a host
+    // drops the badge or ships another official-glyph preset under the same
+    // label. Our own row renders NO icon element at all (external preset
+    // values are absent from permissionGlyphs), so the guard never blocks it.
     const REVIEW_ITEM_MARKER = "data-dsh-agent-approval-review-item";
     const REVIEW_GATE_ATTR = "data-dsh-agent-approval-review-gate";
 
@@ -274,7 +324,13 @@ window.__ModuleLoader__.load({
           const button = items[i];
           const text = button.textContent ? button.textContent.trim() : "";
           const menu = button.closest('[role="menu"]');
-          if (text === currentLabel && menu !== null && glyphMenus.indexOf(menu) !== -1) {
+          const officialRowGlyph = button.querySelector('span[class*="itemIcon"] svg') !== null;
+          if (
+            text === currentLabel &&
+            menu !== null &&
+            glyphMenus.indexOf(menu) !== -1 &&
+            !officialRowGlyph
+          ) {
             button.setAttribute(REVIEW_ITEM_MARKER, "");
           } else {
             button.removeAttribute(REVIEW_ITEM_MARKER);
