@@ -29,21 +29,25 @@ import { z } from "zod";
 
 // ---- shared shapes ---------------------------------------------------------
 
-const recordSchema = z
-  .object({
-    at: z.string(),
-    sessionId: z.string(),
-    toolName: z.string(),
-    reason: z.string(),
-    args: z.string(),
-    outcome: z.enum(["allowed-once", "rejected", "cancelled", "unavailable"]),
-    riskLevel: z.string(),
-    model: z.string(),
-    durationMs: z.number(),
-    childSessionId: z.string(),
-    rationale: z.string(),
-    mode: z.enum(["escalation", "review"]),
-  })
+const recordFields = {
+  at: z.string(),
+  sessionId: z.string(),
+  toolName: z.string(),
+  reason: z.string(),
+  args: z.string(),
+  outcome: z.enum(["allowed-once", "rejected", "cancelled", "unavailable"]),
+  riskLevel: z.string(),
+  model: z.string(),
+  durationMs: z.number(),
+  childSessionId: z.string(),
+  rationale: z.string(),
+  mode: z.enum(["escalation", "review"]),
+};
+
+const recordSchema = z.object(recordFields).readonly();
+/** Paged-only stable identity: zero-based physical JSONL line number. */
+const pagedRecordSchema = z
+  .object({ ...recordFields, id: z.number().int().nonnegative() })
   .readonly();
 
 const modelRouteSchema = z
@@ -160,6 +164,15 @@ const sessionRecordsValueSchema = z
   })
   .readonly();
 
+const sessionRecordsPageValueSchema = z
+  .object({
+    records: z.array(pagedRecordSchema).readonly(),
+    enabled: z.boolean(),
+    nextCursor: z.string().nullable(),
+    syncCursor: z.string().nullable(),
+  })
+  .readonly();
+
 const directoryValueSchema = z
   .object({
     providers: z
@@ -220,6 +233,7 @@ const toggleResultSchema = okResult(toggleValueSchema);
 const addRuleResultSchema = okResult(rulesValueSchema);
 const removeRuleResultSchema = okResult(rulesValueSchema);
 const sessionRecordsResultSchema = okResult(sessionRecordsValueSchema);
+const sessionRecordsPageResultSchema = okResult(sessionRecordsPageValueSchema);
 const directoryResultSchema = okResult(directoryValueSchema);
 
 // ---- per-invocation parameter schemas ----------------------------------------
@@ -266,6 +280,13 @@ const _agentApproval_removeRule_parameter_0$schema = z.object({
 
 const _agentApproval_sessionRecords_parameter_0$schema = z.object({
   sessionId: z.string(),
+});
+
+const _agentApproval_sessionRecordsPage_parameter_0$schema = z.object({
+  sessionId: z.string(),
+  limit: z.number().int().min(1).max(200).optional(),
+  before: z.string().optional(),
+  after: z.string().optional(),
 });
 
 export const TYPERT = {
@@ -532,6 +553,33 @@ export const TYPERT = {
       sourceLocation: { file: "index.js", line: 1, column: 1 },
     },
     {
+      id: "dsh-agent-approval#agentApproval/sessionRecordsPage",
+      service: "agentApproval",
+      namespace: "agentApproval",
+      method: "sessionRecordsPage",
+      invocation: { kind: "direct" },
+      parameters: [
+        {
+          name: "request",
+          wire: "request",
+          source: "json",
+          codec: {
+            mode: "strict",
+            typeSymbol: "dsh-agent-approval#AgentApprovalSessionRecordsPageRequest",
+            schema: _agentApproval_sessionRecordsPage_parameter_0$schema,
+            create: () => _agentApproval_sessionRecordsPage_parameter_0$schema,
+          },
+        },
+      ],
+      result: {
+        mode: "strict",
+        typeSymbol: "dsh-agent-approval#AgentApprovalSessionRecordsPageResult",
+        schema: sessionRecordsPageResultSchema,
+        create: () => sessionRecordsPageResultSchema,
+      },
+      sourceLocation: { file: "index.js", line: 1, column: 1 },
+    },
+    {
       id: "dsh-agent-approval#agentApproval/directory",
       service: "agentApproval",
       namespace: "agentApproval",
@@ -641,6 +689,14 @@ export const TYPERT = {
           },
           {
             kind: "method",
+            name: "sessionRecordsPage",
+            signature: "@Remote('sessionRecordsPage') async sessionRecordsPage(request: AgentApprovalSessionRecordsPageRequest): Promise<AgentApprovalSessionRecordsPageResult>",
+            summary: "Read one bounded audit page or an append-only increment for one live session.",
+            jsDoc:
+              "/**\n * Read a bounded page of one live session's audit sidecar, or an append-only increment. Physical line ids and snapshot-bounded cursors keep equal/out-of-order timestamps exact.\n * @param request - { sessionId, limit?, before?, after? }.\n * @returns paged records with stable ids, cursors, and the current enabled state.\n */",
+          },
+          {
+            kind: "method",
             name: "directory",
             signature: "@Remote('directory') async directory(): Promise<AgentApprovalDirectoryResult>",
             summary: "Providers/models directory plus the harness default selection, for the Settings pickers.",
@@ -728,6 +784,26 @@ export const TYPERT = {
             name: "AgentApprovalSessionRecordsResult",
             declaration:
               "export type AgentApprovalSessionRecordsResult = { ok: true; value: AgentApprovalSessionRecordsValue } | { ok: false; error: { code: string; message?: string } };",
+          },
+          {
+            name: "AgentApprovalPagedRecord",
+            declaration:
+              "export interface AgentApprovalPagedRecord extends AgentApprovalRecord {\n    readonly id: number;\n}",
+          },
+          {
+            name: "AgentApprovalSessionRecordsPageRequest",
+            declaration:
+              "export interface AgentApprovalSessionRecordsPageRequest {\n    readonly sessionId: string;\n    readonly limit?: number;\n    readonly before?: string;\n    readonly after?: string;\n}",
+          },
+          {
+            name: "AgentApprovalSessionRecordsPageValue",
+            declaration:
+              "export interface AgentApprovalSessionRecordsPageValue {\n    readonly records: readonly AgentApprovalPagedRecord[];\n    readonly enabled: boolean;\n    readonly nextCursor: string | null;\n    readonly syncCursor: string | null;\n}",
+          },
+          {
+            name: "AgentApprovalSessionRecordsPageResult",
+            declaration:
+              "export type AgentApprovalSessionRecordsPageResult = { ok: true; value: AgentApprovalSessionRecordsPageValue } | { ok: false; error: { code: string; message?: string } };",
           },
           {
             name: "AgentApprovalStateResult",

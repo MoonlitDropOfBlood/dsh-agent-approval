@@ -67,6 +67,8 @@ import { Service } from "@deepseek-ai/cordis";
 import { appendFile, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+import { JudgeContextCache } from "./judge-context.js";
+import { AuditRecordStore } from "./audit-store.js";
 
 // ---- constants --------------------------------------------------------------
 
@@ -686,6 +688,7 @@ export class AgentApprovalService extends TypertRemoteService {
     markRemoteMethod(this, "addRule", "addRule");
     markRemoteMethod(this, "removeRule", "removeRule");
     markRemoteMethod(this, "sessionRecords", "sessionRecords");
+    markRemoteMethod(this, "sessionRecordsPage", "sessionRecordsPage");
     markRemoteMethod(this, "directory", "directory");
 
     /** Judge model override; empty strings = use the harness default route. */
@@ -744,6 +747,33 @@ export class AgentApprovalService extends TypertRemoteService {
      * overturn it. Cleared at the same three sites as `_trusted`.
      */
     this._reviewDenied = new Map();
+    /**
+     * v1.12.0: delegated children of a 自动审查 session. DSH's delegation
+     * seeds a child with the parent's sandbox override (danger-full-access in
+     * review mode) and pins its approval policy to "never", but it never
+     * carries our `agent-review` preset — so a child of a reviewed session
+     * would otherwise run machine-changing commands with Full access and no
+     * judge at all. Session ids that were created under a review-mode
+     * ancestor; the live lineage is checked as well, so a parent that enters
+     * review mode later still covers its children.
+     */
+    this._reviewInherited = new Set();
+    /**
+     * Sessions that explicitly selected a preset other than 自动审查. Their
+     * own choice suppresses an inherited review; selecting 自动审查 clears
+     * the suppression. Restored from the durable preset on agent/created and
+     * dropped on disposal.
+     */
+    this._reviewOptOut = new Set();
+    /**
+     * Derived judge context (raw call arguments + genuine user messages).
+     * Current Hosts use a host-only projection; older Hosts use the same pure
+     * fold in a WeakMap with exact seq checks. Never an authorization store.
+     */
+    this._judgeContext = new JudgeContextCache((session) => this._eventsOf(session));
+    this._judgeContext.attach(this.ctx);
+    /** Lazy per-session audit index; no file is read until its audit is viewed. */
+    this._auditStore = new AuditRecordStore((sessionId, entry) => this._recordShape(sessionId, entry));
 
     // Claim escalations BEFORE the interactive answerer. The host apiproxy
     // answerer registered earlier (composition load order); `{ prepend: true }`
@@ -771,10 +801,14 @@ export class AgentApprovalService extends TypertRemoteService {
     // knob events right after the selection event, and restoring ours in that
     // window would fight the user's explicit choice.
     this.ctx.on("session/event", (session, event) => {
+      // Cache observation has its own fault isolation and runs for EVERY event,
+      // before the preset-only filter: unrelated events still advance seq.
+      this._judgeContext.observe(session, event);
       try {
         if (!event || event.type !== "permission/preset") return;
         const name = event.data && event.data.preset;
         if (name === PRESET_NAME) {
+          this._reviewOptOut.add(session.id);
           const entry = this._enabled.get(session.id);
           if (entry !== undefined && entry.mode === "escalation") return;
           const agent = this.ctx.agents.get(session.id);
@@ -787,6 +821,7 @@ export class AgentApprovalService extends TypertRemoteService {
             this._enableCore(session, agent, "escalation");
           }
         } else if (name === REVIEW_PRESET_NAME) {
+          this._reviewOptOut.delete(session.id);
           const entry = this._enabled.get(session.id);
           if (entry !== undefined && entry.mode === "review") return;
           const agent = this.ctx.agents.get(session.id);
@@ -800,10 +835,16 @@ export class AgentApprovalService extends TypertRemoteService {
           if (!this._switchCore(session, agent, "review")) {
             this._enableCore(session, agent, "review");
           }
-        } else if (this._enabled.has(session.id)) {
-          this._enabled.delete(session.id);
-          this._trusted.delete(session.id);
-          this._reviewDenied.delete(session.id);
+        } else {
+          // An explicit non-review preset wins over BOTH the creation-time
+          // snapshot and the live ancestor chain for this session.
+          this._reviewOptOut.add(session.id);
+          this._reviewInherited.delete(session.id);
+          if (this._enabled.has(session.id)) {
+            this._enabled.delete(session.id);
+            this._trusted.delete(session.id);
+            this._reviewDenied.delete(session.id);
+          }
         }
       } catch (e) {
         /* an emit listener must never throw */
@@ -814,13 +855,33 @@ export class AgentApprovalService extends TypertRemoteService {
     // agent-approval preset — resumed after a restart, or freshly created
     // with it as the default — gets its judging mode back. This is what makes
     // the mode survive restarts. Subagent children never carry the preset
-    // event (delegation seeds only sandbox/approval), so they stay out.
+    // event (delegation seeds only sandbox/approval), so the ESCALATION mode
+    // stays out of them (no recursive approval); the REVIEW mode reaches
+    // them through the delegation lineage instead — see _ancestorInReviewMode.
     this.ctx.on("agent/created", (payload) => {
       try {
         const agent = payload && payload.agent;
         if (!agent || !agent.session) return;
-        if (this._enabled.has(agent.session.id)) return;
         const preset = this._lastKnob(agent.session, "permission/preset", "preset");
+        if (preset === REVIEW_PRESET_NAME) {
+          this._reviewOptOut.delete(agent.session.id);
+        } else if (typeof preset === "string" && preset !== "") {
+          // A restored session's explicit non-review choice must suppress
+          // inheritance just like a live preset selection.
+          this._reviewOptOut.add(agent.session.id);
+        }
+        // Snapshot the inherited review for a delegated child: the host gave
+        // it the parent's Full-access sandbox but never our preset, so
+        // without this the child would run machine-changing commands with
+        // nobody judging them once the parent is gone.
+        if (
+          !this._enabled.has(agent.session.id) &&
+          !this._reviewOptOut.has(agent.session.id) &&
+          this._ancestorInReviewMode(agent.session)
+        ) {
+          this._reviewInherited.add(agent.session.id);
+        }
+        if (this._enabled.has(agent.session.id)) return;
         if (preset === REVIEW_PRESET_NAME) {
           // Restart survival for 自动审查 — re-checked against the gate: a
           // backend whose judge is gone while the app was down (the Jev key
@@ -848,6 +909,10 @@ export class AgentApprovalService extends TypertRemoteService {
           this._enabled.delete(session.id);
           this._trusted.delete(session.id);
           this._reviewDenied.delete(session.id);
+          this._reviewInherited.delete(session.id);
+          this._reviewOptOut.delete(session.id);
+          this._judgeContext.invalidate(session);
+          this._auditStore.invalidate(session);
         }
       } catch (e) {
         /* cleanup only */
@@ -864,8 +929,11 @@ export class AgentApprovalService extends TypertRemoteService {
           const agent = context.agent;
           if (agent === undefined) return "";
           const entry = this._enabled.get(agent.session.id);
-          if (entry === undefined) return "";
-          if (entry.mode === "review") {
+          // A delegated child of a reviewed session has no own entry but IS
+          // reviewed — tell it, or it cannot understand a denial. An own
+          // escalation entry must still reach the approval text below.
+          if (entry === undefined && !this._reviewCovers(agent.session)) return "";
+          if (entry === undefined || entry.mode === "review") {
             return (
               "Per-call review mode (自动审查) is ON for this session: the sandbox base is danger-full-access, and the tools that change the machine — bash, pwsh, write, edit, str_replace_editor and MCP tools (mcp__*) — are each reviewed by the configured review judge (TypeSafe Jev or an LLM) before execution. Read-only tools (read/glob/grep/web_fetch/...) are NOT reviewed and run unattended. The judge sees the exact tool call and the user's actual request; risky, destructive, out-of-scope, or dishonest calls are rejected outright and their body never runs. A rejection can only be overturned by the USER: when the user, after being told the stated risk, explicitly asks to proceed with this exact action, retry the SAME call unchanged — the reviewer then sees the prior denial plus the user's explicit approval and may allow it. Never modify or split a denied call to route around the reviewer (it re-judges the same way, and evasion is dishonest). Obviously destructive or secret-exfiltrating calls stay rejected even with user approval. The user can also whitelist an operation from the conversation window's 审批 tab. Note that bash/pwsh can do anything any unreviewed tool could, so routing around the judge by switching tools achieves nothing: state the exact target of each operation and its link to the task."
             );
@@ -1140,6 +1208,7 @@ export class AgentApprovalService extends TypertRemoteService {
       prevPreset: this._lastKnob(session, "permission/preset", "preset"),
       mode: isReview ? "review" : "escalation",
     });
+    if (isReview) this._snapshotReviewDescendants();
     if (effectiveSandbox !== baseMode) session.append("sandbox/mode", { mode: baseMode });
     approval.setPolicy(agent, "ask");
   }
@@ -1169,6 +1238,7 @@ export class AgentApprovalService extends TypertRemoteService {
       prevPreset: prev.prevPreset,
       mode: isReview ? "review" : "escalation",
     });
+    if (isReview) this._snapshotReviewDescendants();
     if (this._lastKnob(session, "sandbox/mode", "mode") !== baseMode) {
       session.append("sandbox/mode", { mode: baseMode });
     }
@@ -1384,27 +1454,19 @@ export class AgentApprovalService extends TypertRemoteService {
    * Never throws.
    */
   async _recordsOf(session) {
-    const out = [];
+    let file = "";
     try {
-      const file = await this._recordsFileOf(session);
-      const text = await readFile(file, "utf8");
-      for (const raw of text.split("\n")) {
-        const line = raw.trim();
-        if (line === "") continue;
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed && typeof parsed === "object" && typeof parsed.at === "string") {
-            out.push(this._recordShape(session.id, parsed));
-          }
-        } catch (e) {
-          /* skip the corrupt line */
-        }
-      }
+      file = await this._recordsFileOf(session);
+      const snapshot = await this._auditStore.read(session, file);
+      return this._auditStore.legacyRecords(snapshot);
     } catch (e) {
-      /* no sidecar yet */
+      /* no sidecar yet: preserve legacy no-throw behavior */
+      if (!file) return [];
+      /* The file could not be read consistently (it kept changing under us).
+         The legacy contract promised "whatever a single read sees", so fall
+         back to one plain read instead of dropping every record. */
+      return this._auditStore.legacyFallback(session, file);
     }
-    out.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
-    return out;
   }
 
   /** Persist the judge settings (model override + timeout + rules) to config.json. */
@@ -1496,15 +1558,9 @@ export class AgentApprovalService extends TypertRemoteService {
 
   // ---- the claimer ----------------------------------------------------------
 
-  /** Read the exact tool-call arguments JSON from the session log by callId. */
+  /** Read exact raw arguments from the current derived context; legacy fallback on eviction. */
   _callArgsOf(session, callId) {
-    if (callId === undefined) return undefined;
-    const events = this._eventsOf(session);
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i];
-      if (e.type === "tool/call" && e.data.callId === callId) return e.data.arguments;
-    }
-    return undefined;
+    return this._judgeContext.callArgs(session, callId);
   }
 
   /**
@@ -1517,32 +1573,7 @@ export class AgentApprovalService extends TypertRemoteService {
    * the requesting agent phrased its justification.
    */
   _recentUserContext(session) {
-    const events = this._eventsOf(session);
-    let first = "";
-    const last = []; // chronological, capped at 3
-    for (let i = 0; i < events.length; i++) {
-      const e = events[i];
-      if (e.type !== "user/message") continue;
-      const msg = e.data;
-      if (!msg || !msg.source || msg.source.kind !== "user") continue;
-      const content = msg.content;
-      if (!Array.isArray(content)) continue;
-      const parts = [];
-      for (const block of content) {
-        if (block && block.type === "text" && typeof block.text === "string") parts.push(block.text);
-      }
-      const text = parts.join("\n").trim();
-      if (text === "") continue;
-      if (first === "") first = text;
-      last.push(text);
-      if (last.length > 3) last.shift();
-    }
-    // Short sessions: the first message is already among the recent ones.
-    const recent = last.filter((t) => t !== first);
-    return {
-      first: trunc(first, 800),
-      recent: recent.map((t) => trunc(t, 800)),
-    };
+    return this._judgeContext.recentUserContext(session);
   }
 
   /**
@@ -2308,6 +2339,81 @@ export class AgentApprovalService extends TypertRemoteService {
   // ---- v1.8.0 per-call review mode (agent-review) ----------------------------
 
   /**
+   * Snapshot every currently live descendant covered by review. This runs
+   * when a session ENTERS review so a child created earlier keeps its coverage
+   * if the reviewed ancestor is disposed before the child's next tool call.
+   */
+  _snapshotReviewDescendants() {
+    try {
+      if (typeof this.ctx.agents.list !== "function") return;
+      for (const agent of this.ctx.agents.list()) {
+        const session = agent && agent.session;
+        if (!session || this._enabled.has(session.id) || this._reviewOptOut.has(session.id)) continue;
+        if (this._ancestorInReviewMode(session)) this._reviewInherited.add(session.id);
+      }
+    } catch (e) {
+      /* best-effort snapshot; the live lineage still covers normal operation */
+    }
+  }
+
+  /**
+   * True when this session's delegation chain contains a session in 自动审查
+   * mode. DSH records the direct parent on every delegated child
+   * (`session.header.parentSession`, plus `origin: "subagent"` and
+   * `delegationDepth`), so the chain can be walked through the live agents.
+   *
+   * Only the REVIEW mode is inherited. The escalation mode (自动审批) must
+   * NOT propagate: a delegated child's escalations are rejected by the host's
+   * own delegation pin (approval policy "never"), so leaving the child out is
+   * fail-closed there — while inheriting it would recurse the approval judge
+   * into itself.
+   */
+  _ancestorInReviewMode(session) {
+    let current = session;
+    // The host caps delegation depth; 8 hops is a safe upper bound for the
+    // walk and keeps a malformed chain from looping.
+    for (let depth = 0; depth < 8; depth++) {
+      const header = current && current.header;
+      const parentId = header && header.parentSession;
+      if (typeof parentId !== "string" || parentId === "") return false;
+      const entry = this._enabled.get(parentId);
+      // An ancestor's own explicit mode decides what IT delegates: review
+      // propagates, escalation (or an explicit opt-out) stops the chain.
+      if (entry !== undefined) return entry.mode === "review";
+      if (this._reviewOptOut.has(parentId)) return false;
+      // A child that inherited review can pass it on even after the original
+      // reviewed ancestor was disposed.
+      if (this._reviewInherited.has(parentId)) return true;
+      const parent = this.ctx.agents.get(parentId);
+      if (parent === undefined || !parent.session) return false;
+      current = parent.session;
+    }
+    return false;
+  }
+
+  /**
+   * Whether this session's machine-changing calls must be judged.
+   *
+   * - The session's own explicit mode wins: 自动审查 reviews it, 自动审批 does
+   *   not (that mode gates escalations, not calls). Any other explicit preset
+   *   opts out of inheritance as well.
+   * - Otherwise a delegated child of a reviewed session inherits the review:
+   *   the host gave it Full access, so judging it is the only thing standing
+   *   between the user and an unreviewed machine-changing call.
+   */
+  _reviewCovers(session) {
+    const entry = this._enabled.get(session.id);
+    if (entry !== undefined) return entry.mode === "review";
+    if (this._reviewOptOut.has(session.id)) return false;
+    if (this._reviewInherited.has(session.id)) return true;
+    const covered = this._ancestorInReviewMode(session);
+    // Make live coverage sticky as a fallback for Hosts without agents.list:
+    // once judged through a live ancestor, disposal must not uncover the child.
+    if (covered) this._reviewInherited.add(session.id);
+    return covered;
+  }
+
+  /**
    * The `tools/pre-execute` waterfall listener (outermost via prepend).
    * Claims every call of a REVIEW-enabled session before its body runs;
    * everything else delegates via `next()` OUTSIDE any try/catch (a failure
@@ -2328,10 +2434,12 @@ export class AgentApprovalService extends TypertRemoteService {
       const s = agent && agent.session;
       if (s === undefined || s === null) return await next();
       if (exec.parent === undefined && String(exec.name) === RUN_CODE_TOOL) return await next();
-      const entry = this._enabled.get(s.id);
-      if (entry === undefined || entry.mode !== "review") return await next();
-      // Scope narrowing: only write / execute / transmit tools are judged.
+      // Scope narrowing first (cheap): only write / execute / transmit tools
+      // are judged. A delegated child of a reviewed session has no preset of
+      // its own (the host never seeds ours into a child) but DID inherit the
+      // parent's Full access — it must be judged as well.
       if (!reviewScopeCovers(String(exec.name))) return await next();
+      if (!this._reviewCovers(s)) return await next();
       session = s;
     } catch (e) {
       // A broken claim check must not fail closed for the (vast majority)
@@ -3276,6 +3384,47 @@ export class AgentApprovalService extends TypertRemoteService {
         enabled: this._enabled.has(sessionId),
       },
     };
+  }
+
+  /** Bounded audit pages and physical-line increments; the legacy method above is unchanged. */
+  async sessionRecordsPage(request) {
+    const sessionId = request && typeof request.sessionId === "string" ? request.sessionId : "";
+    if (sessionId === "") {
+      return { ok: false, error: { code: "invalid-session", message: "sessionId is required" } };
+    }
+    const agent = this.ctx.agents.get(sessionId);
+    if (agent === undefined) {
+      return {
+        ok: false,
+        error: { code: "session-not-live", message: "that session is not live right now" },
+      };
+    }
+    try {
+      const file = await this._recordsFileOf(agent.session);
+      const page = await this._auditStore.page(agent.session, file, {
+        limit: request.limit,
+        before: request.before,
+        after: request.after,
+      });
+      return {
+        ok: true,
+        value: {
+          records: page.records,
+          enabled: this._enabled.has(sessionId),
+          nextCursor: page.nextCursor,
+          // Older-page responses never move the client's append sync cursor.
+          // `null` and `undefined` both mean "no before cursor" here, exactly
+          // as the store reads them.
+          syncCursor: request.before !== undefined && request.before !== null ? null : page.syncCursor,
+        },
+      };
+    } catch (error) {
+      const code = error && typeof error.code === "string" ? error.code : "audit-unavailable";
+      return {
+        ok: false,
+        error: { code, message: error && error.message ? error.message : String(error) },
+      };
+    }
   }
 
   /**

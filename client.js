@@ -472,6 +472,15 @@ window.__ModuleLoader__.load({
           result: result("dsh-agent-approval#AgentApprovalSessionRecordsResult"),
         },
         {
+          id: "dsh-agent-approval#agentApproval/sessionRecordsPage",
+          service: "agentApproval",
+          namespace: "agentApproval",
+          method: "sessionRecordsPage",
+          invocation: { kind: "direct" },
+          parameters: param("dsh-agent-approval#AgentApprovalSessionRecordsPageRequest"),
+          result: result("dsh-agent-approval#AgentApprovalSessionRecordsPageResult"),
+        },
+        {
           id: "dsh-agent-approval#agentApproval/directory",
           service: "agentApproval",
           namespace: "agentApproval",
@@ -533,12 +542,16 @@ window.__ModuleLoader__.load({
       function pick(res) {
         if (res && res.ok === false) {
           const err = res.error || {};
-          throw new Error(err.message || err.code || "request failed");
+          const error = new Error(err.message || err.code || "request failed");
+          error.code = err.code;
+          throw error;
         }
         const v = res && res.value;
         if (v && typeof v === "object" && v.ok === false) {
           const err = v.error || {};
-          throw new Error(err.message || err.code || "request failed");
+          const error = new Error(err.message || err.code || "request failed");
+          error.code = err.code;
+          throw error;
         }
         if (v && typeof v === "object" && v.ok === true) return v.value;
         return v;
@@ -668,6 +681,18 @@ window.__ModuleLoader__.load({
         const model = modelSlot[0];
         const timeoutDraft = timeoutSlot[0];
 
+        // A gateway refusal means the Host half does not export the method.
+        // `typeof remote.x === "function"` can never detect that (the client
+        // gateway installs every client-contributed descriptor), so the
+        // runtime error is the only place to learn about an outdated Host.
+        const saveFailed = (e, method) => {
+          if (hostMethodMissing(e)) {
+            setNote("Host 半未更新（缺少 " + method + "）：请重装本插件并重启 DSH。");
+            return;
+          }
+          setNote("保存失败：" + (e && e.message ? e.message : String(e)));
+        };
+
         const saveModel = () => {
           remote
             .setModel({ provider: provider, model: model })
@@ -675,9 +700,12 @@ window.__ModuleLoader__.load({
               refresh();
               setNote("审批模型已保存");
             })
-            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+            .catch((e) => saveFailed(e, "setModel"));
         };
         const saveJudgeMode = (mode) => {
+          // Not a capability probe: the client gateway installs every
+          // client-contributed descriptor, so this is always true. The
+          // outdated-Host case is detected from the gateway error below.
           if (typeof remote.setJudgeMode !== "function") {
             setNote("Host 半未更新（缺少 setJudgeMode）：请重装本插件并重启 DSH。");
             return;
@@ -692,13 +720,14 @@ window.__ModuleLoader__.load({
                   : "裁决方式已保存：LLM 直连（不创建子会话，零上下文污染）",
               );
             })
-            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+            .catch((e) => saveFailed(e, "setJudgeMode"));
         };
         const jevKey = jevKeySlot[0];
         const jevEndpoint = jevEndpointSlot[0];
         const jevModel = jevModelSlot[0];
         const jevConf = jevConfSlot[0];
         const saveJev = () => {
+          // Not a capability probe — see saveFailed() above.
           if (typeof remote.setJevConfig !== "function") {
             setNote("Host 半未更新（缺少 setJevConfig）：请重装本插件并重启 DSH。");
             return;
@@ -723,9 +752,10 @@ window.__ModuleLoader__.load({
                   : "Jev 配置已保存，但 API Key 仍为空：自动审查保持关闭",
               );
             })
-            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+            .catch((e) => saveFailed(e, "setJevConfig"));
         };
         const applyReviewBackend = (backend) => {
+          // Not a capability probe — see saveFailed() above.
           if (typeof remote.setReviewBackend !== "function") {
             setNote("Host 半未更新（缺少 setReviewBackend）：请重装本插件并重启 DSH。");
             return;
@@ -743,7 +773,7 @@ window.__ModuleLoader__.load({
                   : "自动审查判定后端已切换为 TypeSafe Jev",
               );
             })
-            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+            .catch((e) => saveFailed(e, "setReviewBackend"));
         };
         const saveTimeout = () => {
           const parsed = Number(timeoutDraft);
@@ -758,7 +788,7 @@ window.__ModuleLoader__.load({
               setTimeoutDraft(String(v.timeoutMs));
               setNote("审批超时已保存");
             })
-            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+            .catch((e) => saveFailed(e, "setApprovalTimeout"));
         };
         const disableSession = (sid) => {
           remote
@@ -788,7 +818,7 @@ window.__ModuleLoader__.load({
               setRuleNote("");
               setNote("规则已保存（deny 优先于 allow；命中即不再经过审批模型）");
             })
-            .catch((e) => setNote("保存失败：" + (e && e.message ? e.message : String(e))));
+            .catch((e) => saveFailed(e, "addRule"));
         };
         const submitRule = () => {
           if (ruleTool.trim() === "") {
@@ -943,10 +973,16 @@ window.__ModuleLoader__.load({
               { className: "aapr-muted" },
               "自动审查是独立的第二种权限模式，与上面的自动审批互不相关：它不看提权，而是以 danger-full-access 为基线，对**能改动机器的工具**——bash、pwsh、write、edit、str_replace_editor 以及 MCP 工具（mcp__*，含 PTC 内层调用，外层 run_code 传输除外）——在执行前用 TypeSafe Jev 判定一次，风险调用直接拒绝、body 不执行、不转人工（fail-closed，拒绝即最终结论）。只读工具（read / glob / grep / web_fetch 等）不参与审查，直接执行。",
               h("br", null),
+              "审查沿委派链覆盖子代理：本会话派生出的子会话（含子代理再派生的孙会话）同样受审——宿主把满权限传给了子会话，子会话的机器改动也必须有人判定。自动审批则不向子会话传播（不递归审批）。",
+              h("br", null),
               "Jev 是结构化决策模型（System One）：直连 TypeSafe API，不创建审批子会话，毫秒级返回带校准概率的裁决。审计「理由」由概率分布合成（Jev 本身不生成文字）；置信度低于阈值时按 fail-closed 处理（记 unavailable，不放行也不记拒绝）。对中文任务上下文的准确率略低于英语。API Key 明文保存在本机 config.json；留空时使用环境变量 TYPESAFE_API_KEY。",
               h("br", null),
               "保存一个可用的 API Key 即完成配置，自动审查随之在 /permission 菜单中可选；是否进入该模式始终是每个会话自己的选择（菜单或 /agent-review on），保存 Key 不会改动任何会话。",
             ),
+            // Always true on any Host (the gateway installs every
+            // client-contributed descriptor), so this row always shows.
+            // An outdated Host fails at save time with an actionable
+            // "Host 半未更新" message instead of a raw gateway error.
             typeof remote.setReviewBackend === "function"
               ? h(
                   "div",
@@ -1139,6 +1175,243 @@ window.__ModuleLoader__.load({
         );
       }
 
+      // ---- audit paging pure helpers (checked by scripts/check-audit-client.mjs)
+
+      /**
+       * True when the gateway refused the call because the Host half does not
+       * export that method.
+       *
+       * DSH installs every client-contributed descriptor as a namespace
+       * method regardless of what the Host actually exports, so
+       * `typeof remote.<method> === "function"` is ALWAYS true and can never
+       * tell us whether the Host has that method. The gateway's own error is
+       * the only reliable signal.
+       */
+      function hostMethodMissing(error) {
+        const code = error && typeof error.code === "string" ? error.code : "";
+        if (
+          code === "gateway/invocation-unavailable" ||
+          code === "gateway/endpoint-unavailable" ||
+          code === "gateway/method-unavailable" ||
+          code === "gateway/service-unavailable" ||
+          code === "gateway/definition-unavailable"
+        ) {
+          return true;
+        }
+        const message = error && typeof error.message === "string" ? error.message : "";
+        return message.indexOf("no active Remote method") !== -1;
+      }
+
+      const AUDIT_PAGE_LIMIT = 100;
+      // Upper bound for the rows the incremental drain keeps on screen. A
+      // long-lived tab must not accumulate (and re-render) every approval of
+      // a long session.
+      const AUDIT_LIVE_LIMIT = 500;
+
+      function createPagedAuditState() {
+        return { rowsById: Object.create(null), order: [], enabled: null, beforeCursor: null, live: new Set() };
+      }
+
+      function comparePagedAuditRecords(left, right) {
+        if (left.at < right.at) return 1;
+        if (left.at > right.at) return -1;
+        return right.id - left.id;
+      }
+
+      // Merge one head/before/after page without replacing records already on
+      // screen. The after direction deliberately ignores page.nextCursor:
+      // that cursor belongs to the in-flight drain, not to the older-page chain.
+      function mergePagedAuditState(previous, page, direction) {
+        // A legacy read replaces the state with a plain {records, enabled}
+        // object; never treat that as a paged state.
+        const base = previous && previous.rowsById ? previous : createPagedAuditState();
+        const source = page && typeof page === "object" ? page : {};
+        const records = Array.isArray(source.records) ? source.records : [];
+        let rowsById = base.rowsById;
+        let order = base.order;
+        const added = [];
+
+        for (let i = 0; i < records.length; i++) {
+          const record = records[i];
+          if (!record || !Number.isInteger(record.id) || record.id < 0) continue;
+          const key = String(record.id);
+          if (Object.prototype.hasOwnProperty.call(rowsById, key)) continue;
+          if (added.length === 0) rowsById = Object.assign(Object.create(null), base.rowsById);
+          rowsById[key] = record;
+          added.push(record.id);
+        }
+        if (added.length > 0) {
+          order = base.order.concat(added);
+          order.sort(function (leftId, rightId) {
+            return comparePagedAuditRecords(rowsById[String(leftId)], rowsById[String(rightId)]);
+          });
+        }
+
+        const enabled = !!source.enabled;
+        const updateBefore = direction !== "after";
+        const beforeCursor = updateBefore
+          ? typeof source.nextCursor === "string" && source.nextCursor !== ""
+            ? source.nextCursor
+            : null
+          : base.beforeCursor;
+
+        // The incremental drain is the only direction that grows without
+        // bound: a long-lived tab would otherwise accumulate every approval
+        // of the session and re-render all of them on every poll — the very
+        // symptom this paging was built to remove. Keep the newest AUDIT_LIVE_LIMIT
+        // drained rows and drop the visually oldest ones; rows the user
+        // loaded explicitly (head, "加载更早") are never dropped, so the
+        // older-page chain keeps working.
+        let live = base.live;
+        if (direction === "after" && added.length > 0) {
+          live = new Set(base.live);
+          for (let i = 0; i < added.length; i++) live.add(added[i]);
+          if (live.size > AUDIT_LIVE_LIMIT) {
+            const excess = live.size - AUDIT_LIVE_LIMIT;
+            let dropped = 0;
+            for (let i = order.length - 1; i >= 0 && dropped < excess; i--) {
+              const id = order[i];
+              if (!live.has(id)) continue;
+              live.delete(id);
+              delete rowsById[String(id)];
+              dropped += 1;
+            }
+            if (dropped > 0) {
+              const kept = [];
+              for (let i = 0; i < order.length; i++) {
+                if (Object.prototype.hasOwnProperty.call(rowsById, String(order[i]))) kept.push(order[i]);
+              }
+              order = kept;
+            }
+          }
+        }
+
+        if (order === base.order && enabled === base.enabled && beforeCursor === base.beforeCursor && live === base.live) {
+          return base;
+        }
+        return { rowsById: rowsById, order: order, enabled: enabled, beforeCursor: beforeCursor, live: live };
+      }
+      /**
+       * Classify a failed audit read.
+       *
+       * - "paging-unavailable": the Host half has no `sessionRecordsPage`
+       *   (an older Host that was not restarted after the package update).
+       *   The client gateway installs every client-contributed descriptor as
+       *   a namespace method regardless of what the Host actually exports, so
+       *   `typeof remote.sessionRecordsPage === "function"` is ALWAYS true and
+       *   can never detect an old Host. The gateway's own error is the only
+       *   reliable signal.
+       * - "cursor-reset": the physical-line cursors no longer describe the
+       *   file (it was rewritten or truncated), so every cursor must go.
+       * - "transient": anything else — the next poll must be able to retry
+       *   without reusing a cursor that may be the cause.
+       */
+      function auditErrorKind(error) {
+        if (hostMethodMissing(error)) return "paging-unavailable";
+        const code = error && typeof error.code === "string" ? error.code : "";
+        if (code === "cursor-stale" || code === "invalid-cursor") return "cursor-reset";
+        return "transient";
+      }
+
+      /**
+       * Which request a poll/button should make.
+       * - "initial": read the newest page from scratch (no cursor yet, or an
+       *   explicit re-sync that dropped the cursor).
+       * - "before": walk one page further back in time.
+       * - "after": drain the lines appended since the last sync cursor.
+       */
+      function planAuditRequest(direction, hasSyncCursor) {
+        if (direction === "older") return "before";
+        if (direction === "resync") return "initial";
+        if (direction === "refresh" && hasSyncCursor) return "after";
+        return "initial";
+      }
+
+      /**
+       * What to do after a failed audit read. Returning the plan (instead of
+       * applying it inline) keeps the decision itself testable.
+       *
+       * - paging-unavailable: switch to the legacy full read; keep the rows.
+       * - cursor-reset: the physical-line ids no longer describe the file —
+       *   drop the cursors AND the rows, and let the next poll take a fresh
+       *   head.
+       * - transient: keep the rows, drop only the append cursor so the next
+       *   poll re-reads the head instead of retrying a possibly bad cursor.
+       */
+      function auditFailurePlan(error) {
+        const kind = auditErrorKind(error);
+        if (kind === "paging-unavailable") {
+          return { kind: kind, legacy: true, resetRows: false, resetCursor: false, note: "" };
+        }
+        if (kind === "cursor-reset") {
+          return {
+            kind: kind,
+            legacy: false,
+            resetRows: true,
+            resetCursor: true,
+            note: "审批记录文件已重建，将在下次刷新时重新同步。",
+          };
+        }
+        return {
+          kind: kind,
+          legacy: false,
+          resetRows: false,
+          resetCursor: true,
+          note: "无法读取审批记录：" + (error && error.message ? error.message : String(error)),
+        };
+      }
+
+      // ---- end audit paging pure helpers
+
+      // Supported runtimes provide React.memo; the identity fallback keeps the
+      // bundle's registration smoke checks usable with their minimal React shim.
+      const memoAuditComponent = typeof React.memo === "function" ? React.memo : function (component) { return component; };
+      const ApprovalAuditRow = memoAuditComponent(function ApprovalAuditRow(props) {
+        const r = props.record;
+        const onWhitelist = props.onWhitelist;
+        return h(
+          "tr",
+          null,
+          h("td", null, fmtTime(r.at)),
+          h(
+            "td",
+            null,
+            String(r.toolName),
+            r.mode === "review" ? h("span", { className: "aapr-mode-review" }, "逐调用") : null,
+          ),
+          h("td", { className: r.outcome === "allowed-once" ? "aapr-ok" : "aapr-no" }, OUTCOME_LABEL[r.outcome] || String(r.outcome)),
+          h("td", null, RISK_LABEL[r.riskLevel] || String(r.riskLevel || "-")),
+          h("td", null, String(r.model)),
+          h("td", null, String(r.durationMs) + "ms"),
+          h(
+            "td",
+            {
+              className: "aapr-cell",
+              title:
+                (r.rationale || "") +
+                (r.args ? "\n\n工具参数：" + r.args : "") +
+                (r.childSessionId ? "\n\n审批会话：" + r.childSessionId : ""),
+            },
+            truncText(r.rationale, 110),
+          ),
+          h(
+            "td",
+            null,
+            r.outcome === "allowed-once" && r.args && r.model !== "rule"
+              ? h(
+                  "button",
+                  {
+                    className: "aapr-whitelist",
+                    onClick: function () { onWhitelist(r); },
+                    title: "把该操作存为放行规则（工具 + 参数子串）：今后直接放行，不再经过审批模型",
+                  },
+                  "加白",
+                )
+              : null,
+          ),
+        );
+      });
+
       /**
        * The conversation-window「审批」tab (`conversation.view`, next to
        * 轨迹): this session's audit trail, folded by the Host out of the
@@ -1149,48 +1422,264 @@ window.__ModuleLoader__.load({
        */
       function ApprovalAuditView(props) {
         const useSession = props.useSession;
-        const session = useSession(function (s) { return s; });
-        const sessionId = session && session.sessionId ? String(session.sessionId) : "";
+        const selectedSessionId = useSession(function (s) { return s && s.sessionId ? s.sessionId : ""; });
+        const sessionId = selectedSessionId ? String(selectedSessionId) : "";
+        // The client gateway installs every client-contributed descriptor as a
+        // namespace method, so this NEVER proves the Host has the method — it
+        // only proves the client bundle is the new one. The real capability
+        // check is the gateway error on the first call (see `auditErrorKind`).
+        const pagingAvailable = typeof remote.sessionRecordsPage === "function";
 
-        const stateSlot = React.useState(null); // { records, enabled } | null
+        const stateSlot = React.useState(null); // paged index or legacy { records, enabled }
         const state = stateSlot[0];
         const setState = stateSlot[1];
         const noteSlot = React.useState("");
         const note = noteSlot[0];
         const setNote = noteSlot[1];
-        const tickSlot = React.useState(0); // manual-refresh counter
-        const tick = tickSlot[0];
-        const setTick = tickSlot[1];
+        const noteKindRef = React.useRef(null); // "error" | "action" | null
+        const legacySlot = React.useState(false);
+        const legacyMode = legacySlot[0];
+        const setLegacyMode = legacySlot[1];
+        const loadingSlot = React.useState(false);
+        const loading = loadingSlot[0];
+        const setLoading = loadingSlot[1];
+
+        const viewRef = React.useRef(null);
+        const stateRef = React.useRef(null);
+        const syncCursorRef = React.useRef(null);
+        const inFlightRef = React.useRef(false);
+        const generationRef = React.useRef(0);
+        const operationsRef = React.useRef(null);
+        const scrollAnchorRef = React.useRef(null);
+        const modeRef = React.useRef(null); // null = undecided, "paged" | "legacy"
 
         React.useEffect(() => {
-          if (sessionId === "") return undefined;
+          const generation = generationRef.current + 1;
+          generationRef.current = generation;
           let alive = true;
-          const load = () => {
+          stateRef.current = null;
+          syncCursorRef.current = null;
+          inFlightRef.current = false;
+          scrollAnchorRef.current = null;
+          operationsRef.current = null;
+          modeRef.current = null;
+          noteKindRef.current = null;
+          setState(null);
+          setNote("");
+          setLoading(false);
+
+          const isCurrent = function () {
+            return alive && generationRef.current === generation;
+          };
+          const errorText = function (error) {
+            return "无法读取审批记录：" + (error && error.message ? error.message : String(error));
+          };
+          const setErrorNote = function (text) {
+            noteKindRef.current = "error";
+            setNote(text);
+          };
+          const clearErrorNote = function () {
+            if (noteKindRef.current === "error") {
+              noteKindRef.current = null;
+              setNote("");
+            }
+          };
+          const captureAfterAnchor = function () {
+            const element = viewRef.current;
+            if (element && element.scrollTop > 0) {
+              scrollAnchorRef.current = { height: element.scrollHeight, top: element.scrollTop };
+            } else {
+              scrollAnchorRef.current = null;
+            }
+          };
+          // True when every newly merged row sits above the previous rows in
+          // the display order (newest first), so the content below the
+          // viewport only grew upwards.
+          const rowsInsertedAtTop = function (previous, next) {
+            if (!previous || !previous.order || previous.order.length === 0) return true;
+            if (!next || !next.order) return false;
+            const offset = next.order.length - previous.order.length;
+            if (offset <= 0) return false;
+            return next.order.indexOf(previous.order[0]) === offset;
+          };
+          const commitPaged = function (page, direction) {
+            const previous = stateRef.current;
+            const next = mergePagedAuditState(previous, page, direction);
+            if (next === previous) return;
+            // Only rows inserted ABOVE the viewport may shift the content the
+            // user is reading. A drained row with a backdated timestamp sorts
+            // to the bottom instead, and compensating for it would jump the
+            // view downwards.
+            if (direction === "after" && (!previous || next.order !== previous.order) && rowsInsertedAtTop(previous, next)) {
+              captureAfterAnchor();
+            }
+            stateRef.current = next;
+            setState(next);
+          };
+          // The legacy full read: identical to the pre-1.12 client behaviour.
+          const loadLegacy = async function () {
             if (typeof remote.sessionRecords !== "function") {
-              if (alive) setNote("Host 半未更新（缺少 sessionRecords）：请重装本插件并重启 DSH。");
+              throw new Error("Host 半未更新（缺少 sessionRecords）：请重装本插件并重启 DSH。");
+            }
+            const res = await remote.sessionRecords({ sessionId: sessionId });
+            if (!isCurrent()) return;
+            const value = pick(res);
+            stateRef.current = value;
+            setState(value);
+          };
+          const handleFailure = async function (error) {
+            if (!isCurrent()) return;
+            const plan = auditFailurePlan(error);
+            if (plan.legacy) {
+              // The Host half predates sessionRecordsPage (the package was
+              // updated but DSH was not restarted). Fall back to the legacy
+              // full read for the rest of this mount; the tab is remounted
+              // when it is re-opened, which re-probes the Host.
+              modeRef.current = "legacy";
+              setLegacyMode(true);
+              try {
+                await loadLegacy();
+                clearErrorNote();
+              } catch (legacyError) {
+                if (isCurrent()) setErrorNote(errorText(legacyError));
+              }
               return;
             }
-            remote
-              .sessionRecords({ sessionId: sessionId })
-              .then((res) => {
-                if (alive) setState(pick(res));
-              })
-              .catch((e) => {
-                if (alive) setNote("无法读取审批记录：" + (e && e.message ? e.message : String(e)));
-              });
+            if (plan.resetRows) {
+              stateRef.current = null;
+              setState(null);
+            }
+            if (plan.resetCursor) syncCursorRef.current = null;
+            setErrorNote(plan.note);
           };
-          load();
-          const timer = setInterval(load, 10000);
+          const run = async function (direction) {
+            if (!isCurrent() || inFlightRef.current || sessionId === "") return;
+            inFlightRef.current = true;
+            setLoading(true);
+            try {
+              if (modeRef.current === "legacy") {
+                await loadLegacy();
+                clearErrorNote();
+                return;
+              }
+              if (!pagingAvailable) {
+                modeRef.current = "legacy";
+                setLegacyMode(true);
+                await loadLegacy();
+                clearErrorNote();
+                return;
+              }
+
+              if (direction === "resync") syncCursorRef.current = null;
+              const plan = planAuditRequest(direction, syncCursorRef.current !== null);
+              if (plan === "initial") {
+                const res = await remote.sessionRecordsPage({
+                  sessionId: sessionId,
+                  limit: AUDIT_PAGE_LIMIT,
+                });
+                if (!isCurrent()) return;
+                const page = pick(res);
+                commitPaged(page, "initial");
+                if (typeof page.syncCursor === "string" && page.syncCursor !== "") {
+                  // A resync deliberately keeps the previous append cursor: if
+                  // the file was rewritten, the next poll must observe
+                  // cursor-stale and drop the rows that now describe a
+                  // different file. The very first load has no cursor yet.
+                  if (direction !== "resync" || syncCursorRef.current === null) {
+                    syncCursorRef.current = page.syncCursor;
+                  }
+                }
+                clearErrorNote();
+                return;
+              }
+
+              if (plan === "before") {
+                const beforeCursor = stateRef.current ? stateRef.current.beforeCursor : null;
+                if (!beforeCursor) return;
+                const res = await remote.sessionRecordsPage({
+                  sessionId: sessionId,
+                  limit: AUDIT_PAGE_LIMIT,
+                  before: beforeCursor,
+                });
+                if (!isCurrent()) return;
+                commitPaged(pick(res), "before");
+                clearErrorNote();
+                return;
+              }
+
+              let afterCursor = syncCursorRef.current;
+              while (afterCursor !== null) {
+                const res = await remote.sessionRecordsPage({
+                  sessionId: sessionId,
+                  limit: AUDIT_PAGE_LIMIT,
+                  after: afterCursor,
+                });
+                if (!isCurrent()) return;
+                const page = pick(res);
+                commitPaged(page, "after");
+                if (typeof page.syncCursor === "string" && page.syncCursor !== "") {
+                  syncCursorRef.current = page.syncCursor;
+                }
+                afterCursor = typeof page.nextCursor === "string" && page.nextCursor !== "" ? page.nextCursor : null;
+              }
+              clearErrorNote();
+            } catch (e) {
+              await handleFailure(e);
+            } finally {
+              if (isCurrent()) {
+                inFlightRef.current = false;
+                setLoading(false);
+              }
+            }
+          };
+
+          if (sessionId !== "") {
+            operationsRef.current = {
+              refresh: function () { return run("refresh"); },
+              // An explicit re-read of the head: reconciles a client that
+              // drifted from the file (a failed drain, a missed poll).
+              resync: function () { return run("resync"); },
+              older: function () { return run("older"); },
+            };
+            run("initial");
+          }
+          const timer = sessionId === "" ? null : setInterval(function () { run("refresh"); }, 10000);
           return () => {
             alive = false;
-            clearInterval(timer);
+            if (timer !== null) clearInterval(timer);
+            if (generationRef.current === generation) {
+              generationRef.current = generation + 1;
+              operationsRef.current = null;
+              inFlightRef.current = false;
+            }
           };
-        }, [sessionId, tick]);
+        }, [sessionId, pagingAvailable]);
+
+        React.useLayoutEffect(() => {
+          const anchor = scrollAnchorRef.current;
+          scrollAnchorRef.current = null;
+          if (!anchor) return;
+          const element = viewRef.current;
+          if (!element) return;
+          const delta = element.scrollHeight - anchor.height;
+          if (delta > 0) element.scrollTop = anchor.top + delta;
+        }, [state && state.order]);
+
+        const refreshAudit = React.useCallback(function () {
+          const operations = operationsRef.current;
+          // "resync" re-reads the newest page instead of draining the append
+          // cursor, so the button reconciles a client that drifted.
+          if (operations) operations.resync();
+        }, []);
+        const loadOlder = React.useCallback(function () {
+          const operations = operationsRef.current;
+          if (operations) operations.older();
+        }, []);
 
         // One-click whitelist from an audit row: the recorded args are a
         // PREFIX of the real arguments JSON (the Host truncates at 2000
         // chars), so stripping the truncation marker keeps a valid substring.
-        const whitelistRecord = (r) => {
+        const whitelistRecord = React.useCallback((r) => {
           const args = String(r.args || "").replace(/…\[truncated\]$/, "");
           remote
             .addRule({
@@ -1199,18 +1688,34 @@ window.__ModuleLoader__.load({
               match: args,
               note: "来自审批审计 " + fmtTime(r.at),
             })
-            .then(() => setNote("已加白：今后该操作直接放行，不再经过审批模型。"))
-            .catch((e) => setNote("加白失败：" + (e && e.message ? e.message : String(e))));
-        };
+            .then(() => {
+              noteKindRef.current = "action";
+              setNote("已加白：今后该操作直接放行，不再经过审批模型。");
+            })
+            .catch((e) => {
+              noteKindRef.current = "action";
+              setNote("加白失败：" + (e && e.message ? e.message : String(e)));
+            });
+        }, []);
 
-        const records = state !== null && Array.isArray(state.records) ? state.records : [];
-        // 倒序展示（最新在最上）；Host 仍按时间正序返回，顺序属于视图层。
-        const ordered = records.slice().reverse();
+        // The shape decides, not the mode: a legacy read produces a plain
+        // {records, enabled} object, a paged read a {rowsById, order} one.
+        // Switching to legacy must never blank the rows that are already on
+        // screen, not even when the legacy read itself fails.
+        const pagedState = state && state.rowsById ? state : null;
+        const records = pagedState
+          ? pagedState.order.map(function (id) { return pagedState.rowsById[String(id)]; })
+          : state !== null && Array.isArray(state.records)
+            ? state.records
+            : [];
+        // Paged order is already (at,id) descending. Legacy keeps its original
+        // full-snapshot reverse and its old index-suffixed key fallback.
+        const ordered = pagedState ? records : records.slice().reverse();
         const enabled = state !== null ? !!state.enabled : null;
 
         return h(
           "div",
-          { className: "aapr-view" },
+          { className: "aapr-view", ref: viewRef },
           h(
             "div",
             { className: "aapr-view-inner" },
@@ -1223,7 +1728,19 @@ window.__ModuleLoader__.load({
                 : enabled === false
                   ? h("span", { className: "aapr-state-off" }, "○ 自动审批/自动审查未开启")
                   : null,
-              h(ui.Button, { variant: "ghost", size: "sm", onClick: () => setTick(tick + 1) }, "刷新"),
+              h(ui.Button, { variant: "ghost", size: "sm", onClick: refreshAudit, disabled: loading }, "刷新"),
+              pagingAvailable && !legacyMode
+                ? h(
+                    ui.Button,
+                    {
+                      variant: "ghost",
+                      size: "sm",
+                      onClick: loadOlder,
+                      disabled: loading || !pagedState || !pagedState.beforeCursor,
+                    },
+                    "加载更早",
+                  )
+                : null,
               note !== "" ? h("span", { className: "aapr-muted" }, note) : null,
             ),
             h(
@@ -1254,47 +1771,11 @@ window.__ModuleLoader__.load({
                         "tbody",
                         null,
                         ordered.map((r, i) =>
-                          h(
-                            "tr",
-                            { key: String(r.at) + "-" + String(i) },
-                            h("td", null, fmtTime(r.at)),
-                            h(
-                              "td",
-                              null,
-                              String(r.toolName),
-                              r.mode === "review" ? h("span", { className: "aapr-mode-review" }, "逐调用") : null,
-                            ),
-                            h("td", { className: r.outcome === "allowed-once" ? "aapr-ok" : "aapr-no" }, OUTCOME_LABEL[r.outcome] || String(r.outcome)),
-                            h("td", null, RISK_LABEL[r.riskLevel] || String(r.riskLevel || "-")),
-                            h("td", null, String(r.model)),
-                            h("td", null, String(r.durationMs) + "ms"),
-                            h(
-                              "td",
-                              {
-                                className: "aapr-cell",
-                                title:
-                                  (r.rationale || "") +
-                                  (r.args ? "\n\n工具参数：" + r.args : "") +
-                                  (r.childSessionId ? "\n\n审批会话：" + r.childSessionId : ""),
-                              },
-                              truncText(r.rationale, 110),
-                            ),
-                            h(
-                              "td",
-                              null,
-                              r.outcome === "allowed-once" && r.args && r.model !== "rule"
-                                ? h(
-                                    "button",
-                                    {
-                                      className: "aapr-whitelist",
-                                      onClick: () => whitelistRecord(r),
-                                      title: "把该操作存为放行规则（工具 + 参数子串）：今后直接放行，不再经过审批模型",
-                                    },
-                                    "加白",
-                                  )
-                                : null,
-                            ),
-                          ),
+                          h(ApprovalAuditRow, {
+                            key: pagedState ? r.id : String(r.at) + "-" + String(i),
+                            record: r,
+                            onWhitelist: whitelistRecord,
+                          }),
                         ),
                       ),
                     ),

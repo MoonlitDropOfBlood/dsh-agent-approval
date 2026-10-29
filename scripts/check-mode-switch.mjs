@@ -50,9 +50,10 @@ function section(title) {
 // ---- mock world -------------------------------------------------------------
 
 /** A session whose append() feeds straight back into its own log fold. */
-function makeSession(id, log) {
+function makeSession(id, log, header) {
   return {
     id,
+    header: header === undefined ? undefined : header,
     snapshotEvents: () => log,
     append: (type, data) => {
       log.push({ type, data });
@@ -89,6 +90,7 @@ function buildWorld() {
   const presetWrites = [];
   const records = [];
   const commands = new Map();
+  const contexts = [];
 
   const presets = {
     names: Object.keys(PRESET_TABLE),
@@ -107,10 +109,15 @@ function buildWorld() {
       return name === "permissionPresets" ? presets : undefined;
     },
     inject(_names, cb) {
-      cb(makeScope());
+      const scope = makeScope();
+      // Capture the model-facing context registrations (the review-mode
+      // notice the plugin injects per session).
+      scope.systemPrompt = { context: (entry) => contexts.push(entry) };
+      cb(scope);
     },
     agents: {
       get: (id) => ctx.__agents.get(id),
+      list: () => Array.from(ctx.__agents.values()),
     },
     approval: {
       setPolicy(_agent, policy) {
@@ -133,7 +140,7 @@ function buildWorld() {
   inst._persistConfig = () => {};
   inst._record = (session, entry) => records.push(entry);
 
-  return { inst, ctx, listeners, policies, presetWrites, records, commands };
+  return { inst, ctx, listeners, policies, presetWrites, records, commands, contexts };
 }
 
 /** Fire the real `session/event` listener the way the host would. */
@@ -524,6 +531,375 @@ async function main() {
     check("PTC inner read delegates (out of scope)", innerRead.claimed === false);
     const innerEdit = await preExecute(w, { agent, name: "edit", parent: "run_code", arguments: {} });
     check("PTC inner edit is judged (in scope)", innerEdit.claimed === true);
+  }
+
+  // ---- delegated children of a reviewed session inherit the review ---------
+  // DSH's delegation seeds a child with the parent's sandbox override (Full
+  // access in review mode) and pins its approval policy to "never" — but it
+  // never carries our `agent-review` preset, so before v1.12.0 the child ran
+  // machine-changing commands with Full access and NO judge.
+
+  section("自动审查 覆盖被委派的子代理");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+    emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+    check("parent is in 自动审查", modeOf(w, parent) === "review", "mode=" + modeOf(w, parent));
+
+    // The host delegates: the child inherits the parent's Full access and
+    // never receives our preset.
+    const childLog = [];
+    const child = makeSession("session-child", childLog, {
+      parentSession: parent.id,
+      origin: "subagent",
+      delegationDepth: 1,
+    });
+    const childAgent = { session: child };
+    w.ctx.__agents.set(child.id, childAgent);
+    agentCreated(w, childAgent);
+    check("the child carries no preset of its own", modeOf(w, child) === "off", "mode=" + modeOf(w, child));
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const childBash = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the child's bash call IS judged", judged === 1 && childBash.claimed === true, "judged=" + judged);
+    const childRead = await preExecute(w, { agent: childAgent, name: "read", parent: undefined, arguments: {} });
+    check("the child's read still delegates (out of scope)", childRead.claimed === false, "judged=" + judged);
+    const childEdit = await preExecute(w, { agent: childAgent, name: "edit", parent: undefined, arguments: {} });
+    check("the child's edit IS judged", judged === 2 && childEdit.claimed === true, "judged=" + judged);
+
+    // The model-facing notice must reach the child too, or it cannot make
+    // sense of a denial.
+    const notice = w.contexts.find((c) => c.name === "agent-approval:policy");
+    check("the review notice is registered", notice !== undefined);
+    const childText = notice.text({ agent: childAgent });
+    check(
+      "the child is told that its calls are reviewed",
+      typeof childText === "string" && childText.indexOf("Per-call review mode") >= 0,
+      "text=" + String(childText).slice(0, 60),
+    );
+
+    // The child's knobs are untouched: the host's delegation pin (approval
+    // policy "never") must not be fought by the plugin.
+    check("the child's sandbox was not rewritten by the plugin", knobOf(childLog, "sandbox/mode", "mode") === undefined);
+  }
+
+  section("自动审批 不传播给子代理（不递归审批）");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+    emit(w, parent, "permission/preset", { preset: PRESET_APPROVAL });
+    check("parent is in 自动审批", modeOf(w, parent) === "escalation", "mode=" + modeOf(w, parent));
+
+    const childLog = [];
+    const child = makeSession("session-child", childLog, {
+      parentSession: parent.id,
+      origin: "subagent",
+      delegationDepth: 1,
+    });
+    const childAgent = { session: child };
+    w.ctx.__agents.set(child.id, childAgent);
+    agentCreated(w, childAgent);
+    check("the child has no escalation entry of its own", modeOf(w, child) === "off", "mode=" + modeOf(w, child));
+
+    const notice = w.contexts.find((c) => c.name === "agent-approval:policy");
+    const parentText = notice.text({ agent: parentAgent });
+    check(
+      "an ordinary 自动审批 session keeps its model-facing approval notice",
+      typeof parentText === "string" && parentText.indexOf("Agent-approval mode is ON") >= 0,
+      "text=" + String(parentText).slice(0, 60),
+    );
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    w.inst._judge = async () => {
+      judged += 1;
+      return "allowed-once";
+    };
+    const pe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the child's call is NOT judged under 自动审批", judged === 0 && pe.claimed === false, "judged=" + judged);
+    const ar = await approvalRequest(w, {
+      agent: childAgent,
+      toolName: "bash",
+      callId: "call-child",
+      reason: "escalate",
+      signal: new AbortController().signal,
+    });
+    check("the child's escalation still delegates (no recursive approval)", judged === 0 && ar.claimed === false);
+  }
+
+  section("子代理显式选择 自动审批 时不继承审查");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+    emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+
+    const childLog = [];
+    const child = makeSession("session-child", childLog, {
+      parentSession: parent.id,
+      origin: "subagent",
+      delegationDepth: 1,
+    });
+    const childAgent = { session: child };
+    w.ctx.__agents.set(child.id, childAgent);
+    agentCreated(w, childAgent);
+
+    // The child explicitly picks 自动审批 → its own mode wins.
+    emit(w, child, "permission/preset", { preset: PRESET_APPROVAL });
+    check("the child switched to 自动审批", modeOf(w, child) === "escalation", "mode=" + modeOf(w, child));
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const pe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("an explicit 自动审批 choice wins over the inherited review", judged === 0 && pe.claimed === false, "judged=" + judged);
+
+    const notice = w.contexts.find((c) => c.name === "agent-approval:policy");
+    const childText = notice.text({ agent: childAgent });
+    check(
+      "the explicit 自动审批 child keeps its approval notice",
+      typeof childText === "string" && childText.indexOf("Agent-approval mode is ON") >= 0,
+      "text=" + String(childText).slice(0, 60),
+    );
+
+    // The child's own escalation choice also stops review from leaking
+    // THROUGH it to a new grandchild.
+    const grandLog = [];
+    const grand = makeSession("session-grand", grandLog, {
+      parentSession: child.id,
+      origin: "subagent",
+      delegationDepth: 2,
+    });
+    const grandAgent = { session: grand };
+    w.ctx.__agents.set(grand.id, grandAgent);
+    agentCreated(w, grandAgent);
+    const grandPe = await preExecute(w, { agent: grandAgent, name: "bash", parent: undefined, arguments: {} });
+    check("an escalation ancestor stops the inherited review chain", judged === 0 && grandPe.claimed === false);
+  }
+
+  section("子代理显式选择其它预设会退出继承审查");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+    emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+
+    const childLog = [];
+    const child = makeSession("session-child", childLog, {
+      parentSession: parent.id,
+      origin: "subagent",
+      delegationDepth: 1,
+    });
+    const childAgent = { session: child };
+    w.ctx.__agents.set(child.id, childAgent);
+    agentCreated(w, childAgent);
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+
+    emit(w, child, "permission/preset", { preset: READ_ONLY });
+    check("read-only records an explicit inheritance opt-out", w.inst._reviewOptOut.has(child.id));
+    const readOnlyPe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("an explicit read-only choice beats the inherited review", judged === 0 && readOnlyPe.claimed === false);
+
+    emit(w, child, "permission/preset", { preset: PRESET_REVIEW });
+    check("selecting 自动审查 clears the opt-out", !w.inst._reviewOptOut.has(child.id));
+    const reviewPe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the child can explicitly re-enter review", judged === 1 && reviewPe.claimed === true);
+
+    emit(w, child, "permission/preset", { preset: "danger-full-access" });
+    check("danger-full-access also opts out of inherited review", w.inst._reviewOptOut.has(child.id));
+    const fullPe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("an explicit Full-access choice beats the inherited review", judged === 1 && fullPe.claimed === false);
+
+    const disposed = w.listeners.find((l) => l.event === "session/disposed");
+    disposed.fn(child);
+    check("disposal clears the opt-out", !w.inst._reviewOptOut.has(child.id));
+
+    // Re-publication folds the durable danger-full-access preset and must
+    // restore the opt-out rather than re-inheriting the live parent's review.
+    childLog.push({ type: "permission/preset", data: { preset: "danger-full-access" } });
+    agentCreated(w, childAgent);
+    check("re-publication restores the explicit opt-out", w.inst._reviewOptOut.has(child.id));
+    check("re-publication does not recreate the inheritance snapshot", !w.inst._reviewInherited.has(child.id));
+    const restoredPe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the restored explicit choice still beats inheritance", judged === 1 && restoredPe.claimed === false);
+  }
+
+  section("父会话结束后子代理仍然受审（创建时快照）");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+    emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+
+    const childLog = [];
+    const child = makeSession("session-child", childLog, {
+      parentSession: parent.id,
+      origin: "subagent",
+      delegationDepth: 1,
+    });
+    const childAgent = { session: child };
+    w.ctx.__agents.set(child.id, childAgent);
+    agentCreated(w, childAgent);
+    check("the creation snapshot is recorded", w.inst._reviewInherited.has(child.id) === true);
+
+    // The parent goes away (disposed) while the child keeps running.
+    const disposed = w.listeners.find((l) => l.event === "session/disposed");
+    disposed.fn(parent);
+    check("the parent's entry is gone", w.inst._enabled.has(parent.id) === false);
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const pe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the orphaned child is still judged", judged === 1 && pe.claimed === true, "judged=" + judged);
+
+    // The orphaned child then delegates a NEW grandchild. Its inherited
+    // review must be transitive even though the original parent is gone.
+    const grandLog = [];
+    const grand = makeSession("session-grand", grandLog, {
+      parentSession: child.id,
+      origin: "subagent",
+      delegationDepth: 2,
+    });
+    const grandAgent = { session: grand };
+    w.ctx.__agents.set(grand.id, grandAgent);
+    agentCreated(w, grandAgent);
+    check("the new grandchild snapshots the orphaned child's inherited review", w.inst._reviewInherited.has(grand.id));
+    const grandPe = await preExecute(w, { agent: grandAgent, name: "bash", parent: undefined, arguments: {} });
+    check("a grandchild created after the root was disposed is still judged", judged === 2 && grandPe.claimed === true);
+  }
+
+  section("父会话后进入自动审查时，子代理随之受审（实时链路）");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+
+    const childLog = [];
+    const child = makeSession("session-child", childLog, {
+      parentSession: parent.id,
+      origin: "subagent",
+      delegationDepth: 1,
+    });
+    const childAgent = { session: child };
+    w.ctx.__agents.set(child.id, childAgent);
+    agentCreated(w, childAgent);
+    check("no inheritance while the parent is not reviewed", w.inst._reviewInherited.has(child.id) === false);
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const before = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the child is not judged while the parent is unreviewed", judged === 0 && before.claimed === false);
+
+    // The parent switches to 自动审查 afterwards.
+    emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+    check("entering review snapshots an already-created child before any call", w.inst._reviewInherited.has(child.id));
+    const after = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the child is judged once the parent is reviewed", judged === 1 && after.claimed === true, "judged=" + judged);
+
+    const disposed = w.listeners.find((l) => l.event === "session/disposed");
+    disposed.fn(parent);
+    const afterDisposal = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the late-covered child stays judged after the parent is disposed", judged === 2 && afterDisposal.claimed === true);
+  }
+
+  section("孙代理沿链路继承审查");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+    emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+
+    const childLog = [];
+    const child = makeSession("session-child", childLog, {
+      parentSession: parent.id,
+      origin: "subagent",
+      delegationDepth: 1,
+    });
+    const childAgent = { session: child };
+    w.ctx.__agents.set(child.id, childAgent);
+    agentCreated(w, childAgent);
+
+    const grandLog = [];
+    const grand = makeSession("session-grand", grandLog, {
+      parentSession: child.id,
+      origin: "subagent",
+      delegationDepth: 2,
+    });
+    const grandAgent = { session: grand };
+    w.ctx.__agents.set(grand.id, grandAgent);
+    agentCreated(w, grandAgent);
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const pe = await preExecute(w, { agent: grandAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the grandchild is judged through the chain", judged === 1 && pe.claimed === true, "judged=" + judged);
   }
 
   // ---- post-denial re-approval (v1.11.0, Guardian-style overturn) ----------
