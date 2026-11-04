@@ -862,13 +862,21 @@ export class AgentApprovalService extends TypertRemoteService {
       try {
         const agent = payload && payload.agent;
         if (!agent || !agent.session) return;
-        const preset = this._lastKnob(agent.session, "permission/preset", "preset");
+        // Do not confuse the Host's automatic delegated-child Full-access
+        // identity with a user's explicit opt-out. The permission service has
+        // a PREPENDED agent/created listener, so its derived preset event has
+        // already landed (and fired session/event) before this listener runs.
+        const preset = this._lastExplicitPreset(agent.session);
         if (preset === REVIEW_PRESET_NAME) {
           this._reviewOptOut.delete(agent.session.id);
         } else if (typeof preset === "string" && preset !== "") {
           // A restored session's explicit non-review choice must suppress
           // inheritance just like a live preset selection.
           this._reviewOptOut.add(agent.session.id);
+        } else {
+          // Clear the provisional opt-out written by the bootstrap preset's
+          // session/event dispatch; there is no explicit child choice yet.
+          this._reviewOptOut.delete(agent.session.id);
         }
         // Snapshot the inherited review for a delegated child: the host gave
         // it the parent's Full-access sandbox but never our preset, so
@@ -1025,6 +1033,81 @@ export class AgentApprovalService extends TypertRemoteService {
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (e.type === type) return e.data[field];
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether this preset event is the Host's delegated-child initialization,
+   * rather than an explicit preset choice made by the child. Delegation first
+   * writes Full access + never with `source: "delegation"`; the permission
+   * service's prepended agent/created listener then fills the missing preset
+   * identity by deriving and appending `danger-full-access`. Treating that
+   * derived identity as a user choice would immediately cancel review
+   * inheritance for exactly the children it is meant to cover.
+   */
+  _isDelegatedBootstrapPreset(session, events, index) {
+    const event = events[index];
+    const header = session && session.header;
+    if (
+      !event ||
+      event.type !== "permission/preset" ||
+      !event.data ||
+      event.data.preset !== REVIEW_BASE_MODE ||
+      !header ||
+      header.origin !== "subagent" ||
+      typeof header.parentSession !== "string" ||
+      header.parentSession === ""
+    ) {
+      return false;
+    }
+    // Only the knobs in force immediately BEFORE the preset event matter.
+    // A later explicit Full-access choice made after another preset changed
+    // the sandbox therefore remains an explicit choice, not bootstrap data.
+    let sandbox;
+    let sandboxIndex = -1;
+    let approval;
+    let approvalIndex = -1;
+    for (let i = index - 1; i >= 0; i--) {
+      const candidate = events[i];
+      if (sandbox === undefined && candidate.type === "sandbox/mode") {
+        sandbox = candidate.data;
+        sandboxIndex = i;
+      }
+      if (approval === undefined && candidate.type === "approval/policy") {
+        approval = candidate.data;
+        approvalIndex = i;
+      }
+      if (sandbox !== undefined && approval !== undefined) break;
+    }
+    if (
+      !sandbox ||
+      sandbox.source !== "delegation" ||
+      sandbox.mode !== REVIEW_BASE_MODE ||
+      !approval ||
+      approval.source !== "delegation" ||
+      approval.policy !== "never"
+    ) {
+      return false;
+    }
+    // Only the FIRST preset after the delegated knob pair can be the Host's
+    // initialization. A second Full-access preset is a later explicit choice
+    // even when the already-matching knobs produce no fresh knob events.
+    const delegatedAt = Math.max(sandboxIndex, approvalIndex);
+    for (let i = delegatedAt + 1; i < index; i++) {
+      if (events[i].type === "permission/preset") return false;
+    }
+    return true;
+  }
+
+  /** Last explicit preset choice, excluding the Host's delegated bootstrap identity. */
+  _lastExplicitPreset(session) {
+    const events = this._eventsOf(session);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.type !== "permission/preset") continue;
+      if (this._isDelegatedBootstrapPreset(session, events, i)) continue;
+      return event.data && event.data.preset;
     }
     return undefined;
   }

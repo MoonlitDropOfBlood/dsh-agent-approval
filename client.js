@@ -78,14 +78,13 @@ window.__ModuleLoader__.load({
 .aapr-state-on{color:var(--dsw-alias-state-success-primary)}
 .aapr-state-off{color:var(--dsw-alias-label-secondary)}
 
-/* Settings nav icon: DSH 0.1.x settings.section only projects id/order/
-   label, and the settings shell paints a generic gear for every external
-   section (client-ui-settings-general's navIcon()). registerSettingsNavIcon
-   marks our own nav row; hide the shell's gear and draw the shield-check
-   Lucide glyph as a currentColor mask so it follows the native nav
-   hover/active colors without changing the shell's 16px icon rhythm. */
-[data-dsh-agent-approval-settings-nav]>svg:first-child{display:none}
-[data-dsh-agent-approval-settings-nav]::before{content:'';flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat}
+/* Settings nav icon compatibility. DSH 0.2.2 has the official
+   settings.section.icon slot; older shells use this text-matched fallback.
+   The fallback hides either the old direct-SVG gear or the new span.navIcon
+   descendant, then paints its mask on the actual icon holder. The official
+   registration disables all fallback markers so the two never coexist. */
+[data-dsh-agent-approval-settings-nav]>svg:first-child,[data-dsh-agent-approval-settings-nav]>span[class*="navIcon"]>svg:first-child{display:none}
+[data-dsh-agent-approval-settings-icon]::before{content:'';display:block;flex:none;width:16px;height:16px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat}
 
 /* /permission menu + composer permission trigger: both pick icons from the
    permissionGlyphs map compiled into the official client bundle (the Menu
@@ -143,12 +142,28 @@ window.__ModuleLoader__.load({
     const SETTINGS_LABEL = "自动审批";
     /** The agent-review preset display name (permission menu row). */
     const REVIEW_LABEL = "自动审查";
+    // ---- settings nav icon compatibility -----------------------------------
     const SETTINGS_NAV_MARKER = "data-dsh-agent-approval-settings-nav";
+    const SETTINGS_NAV_ICON_MARKER = "data-dsh-agent-approval-settings-icon";
 
+    /**
+     * Legacy settings-nav fallback with an explicit official-slot switch.
+     * The observer runs only while the official slot is absent; enabling the
+     * official icon clears every marker, so no legacy mask can stack with it.
+     */
     function registerSettingsNavIcon(label) {
       let disposed = false;
+      let official = false;
+      let observer = null;
+      const clear = function () {
+        const rows = document.querySelectorAll("[" + SETTINGS_NAV_MARKER + "]");
+        for (let i = 0; i < rows.length; i++) rows[i].removeAttribute(SETTINGS_NAV_MARKER);
+        const icons = document.querySelectorAll("[" + SETTINGS_NAV_ICON_MARKER + "]");
+        for (let i = 0; i < icons.length; i++) icons[i].removeAttribute(SETTINGS_NAV_ICON_MARKER);
+      };
       const sync = function () {
-        if (disposed) return;
+        clear();
+        if (disposed || official) return;
         const currentLabel = String(label).trim();
         const buttons = document.querySelectorAll('[role="dialog"] nav button');
         for (let i = 0; i < buttons.length; i++) {
@@ -156,21 +171,40 @@ window.__ModuleLoader__.load({
           const text = button.textContent ? button.textContent.trim() : "";
           if (currentLabel.length > 0 && text === currentLabel) {
             button.setAttribute(SETTINGS_NAV_MARKER, "");
-          } else {
-            button.removeAttribute(SETTINGS_NAV_MARKER);
+            // 0.2.2 wraps the glyph in span.navIcon. Put the fallback mask in
+            // that same holder; on older shells the button itself is the holder.
+            const holder = button.querySelector('span[class*="navIcon"]') || button;
+            holder.setAttribute(SETTINGS_NAV_ICON_MARKER, "");
           }
         }
       };
+      const observe = function () {
+        if (disposed || official || observer !== null) return;
+        observer = new MutationObserver(sync);
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      };
+      const setOfficial = function (value) {
+        official = value === true;
+        if (observer !== null) {
+          observer.disconnect();
+          observer = null;
+        }
+        sync();
+        observe();
+      };
       sync();
-      const observer = new MutationObserver(sync);
-      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-      return function () {
-        disposed = true;
-        observer.disconnect();
-        const marked = document.querySelectorAll("[" + SETTINGS_NAV_MARKER + "]");
-        for (let i = 0; i < marked.length; i++) marked[i].removeAttribute(SETTINGS_NAV_MARKER);
+      observe();
+      return {
+        setOfficial,
+        dispose: function () {
+          disposed = true;
+          if (observer !== null) observer.disconnect();
+          observer = null;
+          clear();
+        },
       };
     }
+    // ---- end settings nav icon compatibility -------------------------------
 
     // ---- /permission menu + composer trigger icon ----------------------------
     // The permission surfaces (menu rows and the composer trigger button) pick
@@ -502,9 +536,11 @@ window.__ModuleLoader__.load({
       document.head.appendChild(styleTag);
       ctx.effect(() => () => styleTag.remove());
 
-      // Mark our settings-nav row so the CSS above replaces the shell's
-      // fallback gear (no icon field exists in settings.section yet).
-      ctx.effect(() => registerSettingsNavIcon(SETTINGS_LABEL));
+      // Keep a legacy text-matched settings-nav icon only until the official
+      // settings.section.icon declaration arrives (DSH 0.2.2+). The controller
+      // also owns cleanup when this client plugin is disabled or reloaded.
+      const settingsNavIcon = registerSettingsNavIcon(SETTINGS_LABEL);
+      ctx.effect(() => settingsNavIcon.dispose);
 
       // Mark the /permission menu row and the composer trigger button so the
       // CSS above paints the preset glyph (external presets get no icon from
@@ -602,6 +638,32 @@ window.__ModuleLoader__.load({
       // and this Settings page (whose session chips can also disable one).
 
       // ---- settings page (settings.section) -----------------------------------
+
+      /** Official DSH 0.2.2 settings.section.icon renderer ({size, active}). */
+      function SettingsSectionIcon(props) {
+        const size = props && typeof props.size === "number" ? props.size : 16;
+        // The shell's nav button owns active/hover color; currentColor keeps
+        // this Lucide shield-check in exactly the same visual state rhythm.
+        return h(
+          "svg",
+          {
+            width: size,
+            height: size,
+            viewBox: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            strokeWidth: 2,
+            strokeLinecap: "round",
+            strokeLinejoin: "round",
+            "aria-hidden": "true",
+            focusable: "false",
+          },
+          h("path", {
+            d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
+          }),
+          h("path", { d: "m9 12 2 2 4-4" }),
+        );
+      }
 
       function AgentApprovalSection(props) {
         const stateSlot = React.useState(null);
@@ -1783,6 +1845,22 @@ window.__ModuleLoader__.load({
           ),
         );
       }
+
+      // Official settings navigation icon (DSH 0.2.2+). The id is the address:
+      // the shell renders this entry only for the matching settings.section id.
+      // While this declaration is active, disable every legacy DOM marker; if
+      // the owner collapses, restore the fallback for older/partial shells.
+      ctx.slots.inject("settings.section.icon", () => {
+        settingsNavIcon.setOfficial(true);
+        const unregister = ctx.slots.register(
+          { name: "settings.section.icon", id: "agent-approval" },
+          SettingsSectionIcon,
+        );
+        return () => {
+          unregister();
+          settingsNavIcon.setOfficial(false);
+        };
+      });
 
       // Settings entry: a full page under the sidebar Settings panel.
       ctx.slots.inject("settings.section", () =>

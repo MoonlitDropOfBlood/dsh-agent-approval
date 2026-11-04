@@ -594,6 +594,71 @@ async function main() {
     check("the child's sandbox was not rewritten by the plugin", knobOf(childLog, "sandbox/mode", "mode") === undefined);
   }
 
+  section("宿主初始化的 Full-access 预设不会退出继承审查");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+    emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+
+    // Match the real 0.2.2 host sequence. Delegation first appends Full access
+    // + never with source=delegation. Then permissionPresets' PREPENDED
+    // agent/created listener sees no preset and derives danger-full-access,
+    // appending that identity before this plugin's agent/created listener runs.
+    // It is host initialization, NOT an explicit child opt-out.
+    const childLog = [
+      { type: "sandbox/mode", data: { mode: FULL, source: "delegation" } },
+      { type: "approval/policy", data: { policy: "never", source: "delegation" } },
+    ];
+    const child = makeSession("session-child", childLog, {
+      parentSession: parent.id,
+      origin: "subagent",
+      delegationDepth: 1,
+    });
+    const childAgent = { session: child };
+    w.ctx.__agents.set(child.id, childAgent);
+    const bootstrap = { type: "permission/preset", data: { preset: FULL } };
+    childLog.push(bootstrap);
+    emit(w, child, bootstrap.type, bootstrap.data);
+    agentCreated(w, childAgent);
+
+    check("the derived Full-access identity is not an explicit opt-out", !w.inst._reviewOptOut.has(child.id));
+    check("the host-initialized child snapshots the inherited review", w.inst._reviewInherited.has(child.id));
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const pe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the real host bootstrap sequence leaves the child judged", judged === 1 && pe.claimed === true, "judged=" + judged);
+
+    // A later explicit Full-access selection may not append replacement knob
+    // events (they already have those exact values). Only the FIRST preset
+    // after the delegated knobs is bootstrap; this second one must survive
+    // disposal + re-publication as an explicit opt-out.
+    const explicit = { type: "permission/preset", data: { preset: FULL } };
+    childLog.push(explicit);
+    emit(w, child, explicit.type, explicit.data);
+    check("a later explicit Full-access choice opts out immediately", w.inst._reviewOptOut.has(child.id));
+    const explicitPe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the later explicit choice stops review", judged === 1 && explicitPe.claimed === false, "judged=" + judged);
+
+    const disposed = w.listeners.find((l) => l.event === "session/disposed");
+    disposed.fn(child);
+    agentCreated(w, childAgent);
+    check("the later explicit choice survives re-publication", w.inst._reviewOptOut.has(child.id));
+    check("re-publication does not resurrect inherited review", !w.inst._reviewInherited.has(child.id));
+    const restoredPe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the restored explicit choice still stops review", judged === 1 && restoredPe.claimed === false, "judged=" + judged);
+  }
+
   section("自动审批 不传播给子代理（不递归审批）");
   {
     const w = buildWorld();
