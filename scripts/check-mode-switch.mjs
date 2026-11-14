@@ -13,13 +13,22 @@
  * where it needed `entry.mode` ("is THIS mode on?"). A test that re-implements
  * the guard would only ever prove the copy, so this drives the real closures.
  *
- * The two invariants under test:
+ * The invariants under test:
  *   1. Selecting the other preset in /permission REWRITES the mode, so a
  *      session left in 自动审查 stops being claimed by tools/pre-execute.
  *   2. A mode switch never corrupts the restore point captured at first
  *      enable — `_disable` must return the session to the user's OWN knobs.
+ *   3. A delegated child of a 自动审查 session is covered by the review AND
+ *      SAYS so: the inherited identity is a standard `permission/preset`
+ *      event (`agent-review` + the plugin's own `source` marker) that the
+ *      permission menu's derive() keeps visible, while the child's
+ *      danger-full-access + never knobs stay exactly as the host pinned
+ *      them. The marker is durable (it restores the coverage after a
+ *      restart, even with the ancestor gone), it is written only once, and
+ *      a LATER explicit preset choice still wins over it.
  */
 
+import { readFileSync } from "node:fs";
 import { Service } from "@deepseek-ai/cordis";
 import { AgentApprovalService } from "../index.js";
 
@@ -49,16 +58,34 @@ function section(title) {
 
 // ---- mock world -------------------------------------------------------------
 
-/** A session whose append() feeds straight back into its own log fold. */
-function makeSession(id, log, header) {
-  return {
+/** The world whose session/event listener a freshly created session feeds. */
+let activeWorld = null;
+
+/**
+ * A session whose append() feeds straight back into its own log fold AND
+ * dispatches the appended event to the plugin's session/event listener.
+ *
+ * The host commits an appended event to the durable log FIRST and then
+ * notifies every observer, so the plugin's OWN appends (the inherited-review
+ * marker, the knob writes of a mode switch) must reach its preset listener
+ * exactly like the host's appends do. Without that dispatch the harness
+ * would test a plugin that never sees its own writes.
+ */
+function makeSession(id, log, header, world) {
+  const owner = world === undefined ? activeWorld : world;
+  const session = {
     id,
     header: header === undefined ? undefined : header,
     snapshotEvents: () => log,
     append: (type, data) => {
       log.push({ type, data });
+      if (owner === null) return;
+      const hit = owner.listeners.find((l) => l.event === "session/event");
+      if (hit === undefined) return;
+      hit.fn(session, { type, data });
     },
   };
+  return session;
 }
 
 const PRESET_TABLE = {
@@ -68,6 +95,120 @@ const PRESET_TABLE = {
   [PRESET_REVIEW]: { sandbox: FULL, approval: "ask" },
   "danger-full-access": { sandbox: FULL, approval: "never" },
 };
+
+/** The host's answer when no configured preset matches the knob state. */
+const CUSTOM_PRESET = "custom";
+
+// ---- the host's preset derivation ------------------------------------------
+// The host resolves the DISPLAYED preset from the folded knob state: the
+// last recorded `permission/preset` identity wins while its bundle still
+// matches, otherwise the first configured entry whose bundle matches wins,
+// and "custom" when nothing matches. The plugin wraps this derivation to
+// display the inherited review identity, so the mock has to reproduce the
+// real mathematics — a wrapper tested against a fiction proves nothing.
+
+function officialDerive(state) {
+  const sandbox = state.sandbox ?? WORKSPACE;
+  const approval = state.approval ?? "ask";
+  const matches = (spec) => spec.sandbox === sandbox && spec.approval === approval;
+  if (state.preset !== null && state.preset !== undefined) {
+    const spec = PRESET_TABLE[state.preset];
+    if (spec !== undefined && matches(spec)) return state.preset;
+  }
+  for (const name of Object.keys(PRESET_TABLE)) {
+    const spec = PRESET_TABLE[name];
+    if (matches(spec)) return name;
+  }
+  return CUSTOM_PRESET;
+}
+
+/** Fold one session's log into the knob state the host's projection keeps. */
+function foldPermissionState(session) {
+  const events = typeof session.snapshotEvents === "function" ? session.snapshotEvents() : [];
+  let preset = null;
+  let sandbox = null;
+  let approval = null;
+  for (const event of events) {
+    if (!event || !event.data) continue;
+    if (event.type === "permission/preset") preset = event.data.preset;
+    else if (event.type === "sandbox/mode") sandbox = event.data.mode;
+    else if (event.type === "approval/policy") approval = event.data.policy;
+  }
+  const state = { preset, sandbox, approval, seeded: false };
+  // The session handle is not part of the host's KnobState. The mock carries
+  // it (a wrapper may need to recognise its own inherited identity) without
+  // letting it leak into shape comparisons.
+  Object.defineProperty(state, "session", { value: session, enumerable: false });
+  return state;
+}
+
+/**
+ * The exact wording of the inherited-review source marker belongs to
+ * index.js. Read it from the shipped source so this regression tracks the
+ * implementation instead of a copy that can silently drift. A constant whose
+ * NAME says "inherited" wins; a constant whose VALUE mentions the inherited
+ * review is the fallback; the documented wording is the last resort.
+ */
+function discoverInheritedSource() {
+  const fallback = { value: "agent-approval/inherited-review", discovered: false };
+  let src;
+  try {
+    src = readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  } catch (e) {
+    return fallback;
+  }
+  const hits = [];
+  const re = /\b([A-Z][A-Z0-9_]{2,})\s*=\s*["'`]([^"'`]+)["'`]/g;
+  let m;
+  while ((m = re.exec(src)) !== null) hits.push({ name: m[1], value: m[2] });
+  const named = hits.filter((h) => /INHERIT/i.test(h.name));
+  if (named.length > 0) {
+    const preferred = named.find((h) => /SOURCE|MARKER|ORIGIN|WHERE/.test(h.name)) || named[0];
+    return { value: preferred.value, discovered: true };
+  }
+  const valued = hits.filter((h) => /inherit/i.test(h.value));
+  if (valued.length > 0) return { value: valued[0].value, discovered: true };
+  return fallback;
+}
+
+const INHERITED_SOURCE = discoverInheritedSource();
+
+/** Whether a preset event is the plugin's own inherited-review marker. */
+function isInheritedMarker(event) {
+  if (!event || event.type !== "permission/preset" || !event.data) return false;
+  if (event.data.preset !== PRESET_REVIEW) return false;
+  const source = event.data.source;
+  return typeof source === "string" && source !== "";
+}
+
+function markerEvents(log) {
+  return log.filter(isInheritedMarker);
+}
+
+function lastPresetOf(log) {
+  let name;
+  for (const event of log) {
+    if (event && event.type === "permission/preset" && event.data) name = event.data.preset;
+  }
+  return name;
+}
+
+function countEvents(log, type) {
+  let n = 0;
+  for (const event of log) if (event && event.type === type) n += 1;
+  return n;
+}
+
+/**
+ * The marker must carry a source that identifies the plugin's own inherited
+ * review. When the implementation's constant was found in index.js the check
+ * is exact; otherwise it falls back to the shipped wording's shape.
+ */
+function isInheritedSource(source) {
+  if (typeof source !== "string" || source === "") return false;
+  if (INHERITED_SOURCE.discovered) return source === INHERITED_SOURCE.value;
+  return /inherit|child|review/i.test(source);
+}
 
 /** Optional capability surfaces — inert stubs; init only touches these. */
 function makeScope() {
@@ -91,12 +232,27 @@ function buildWorld() {
   const records = [];
   const commands = new Map();
   const contexts = [];
+  const effects = [];
 
+  // The host's permission-presets service. `derive` mirrors the host's own
+  // state matching, `stateOf` folds the session's durable log the way the
+  // host's permission projection folds it, and `current` resolves a session
+  // through `derive` — so a wrapper installed on either one is exercised
+  // through the same path the host uses.
   const presets = {
     names: Object.keys(PRESET_TABLE),
     resolve: (name) => PRESET_TABLE[name],
     set: (session, name) => {
       presetWrites.push({ sessionId: session.id, name });
+    },
+    derive(state) {
+      return officialDerive(state);
+    },
+    current(session) {
+      return this.derive(this.stateOf(session), session);
+    },
+    stateOf(session) {
+      return foldPermissionState(session);
     },
   };
 
@@ -108,20 +264,39 @@ function buildWorld() {
     get(name) {
       return name === "permissionPresets" ? presets : undefined;
     },
-    inject(_names, cb) {
+    inject(names, cb) {
       const scope = makeScope();
       // Capture the model-facing context registrations (the review-mode
       // notice the plugin injects per session).
       scope.systemPrompt = { context: (entry) => contexts.push(entry) };
+      // The preset service is a composed dependency: hand the very same
+      // service object over, so a wrapper installed through injection is the
+      // one `ctx.get("permissionPresets")` returns.
+      if (Array.isArray(names) && names.includes("permissionPresets")) {
+        scope.permissionPresets = presets;
+      }
       cb(scope);
+    },
+    effect(execute, label) {
+      const disposer = typeof execute === "function" ? execute() : undefined;
+      const record = { label, disposer };
+      effects.push(record);
+      return {
+        dispose() {
+          if (typeof record.disposer === "function") record.disposer();
+        },
+      };
     },
     agents: {
       get: (id) => ctx.__agents.get(id),
       list: () => Array.from(ctx.__agents.values()),
     },
     approval: {
-      setPolicy(_agent, policy) {
-        policies.push(policy);
+      setPolicy(agent, policy) {
+        policies.push({
+          agentId: agent && agent.session ? agent.session.id : undefined,
+          policy,
+        });
       },
       overrideOf: () => undefined,
       config: { policy: "ask" },
@@ -140,7 +315,21 @@ function buildWorld() {
   inst._persistConfig = () => {};
   inst._record = (session, entry) => records.push(entry);
 
-  return { inst, ctx, listeners, policies, presetWrites, records, commands, contexts };
+  const world = {
+    inst,
+    ctx,
+    listeners,
+    policies,
+    presetWrites,
+    records,
+    commands,
+    contexts,
+    effects,
+    presets,
+  };
+  // Sessions created from here on belong to this world (see makeSession).
+  activeWorld = world;
+  return world;
 }
 
 /** Fire the real `session/event` listener the way the host would. */
@@ -200,6 +389,51 @@ function seedUserKnobs(log) {
   log.push({ type: "sandbox/mode", data: { mode: READ_ONLY } });
   log.push({ type: "approval/policy", data: { policy: "ask" } });
   log.push({ type: "permission/preset", data: { preset: "read-only" } });
+}
+
+/**
+ * A parent session whose user picked 自动审查 in the permission menu, with
+ * its agent registered in the world.
+ *
+ * The host appends the selection to the durable log BEFORE it notifies the
+ * observers, and the plugin's listener reads the log — so the event is put in
+ * the log first, exactly like the host does it.
+ */
+function seedReviewedParent(w, id = "session-parent") {
+  const parentLog = [];
+  seedUserKnobs(parentLog);
+  const parent = makeSession(id, parentLog, undefined, w);
+  const parentAgent = { session: parent };
+  w.ctx.__agents.set(parent.id, parentAgent);
+  parentLog.push({ type: "permission/preset", data: { preset: PRESET_REVIEW } });
+  emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+  return { parent, parentAgent, parentLog };
+}
+
+/**
+ * A delegated child created through the host's REAL bootstrap sequence:
+ * delegation pins danger-full-access + never, then the permission service
+ * derives and appends the plain Full-access identity before the plugin's own
+ * agent/created listener runs (the permission service's agent/created
+ * listener is PREPENDED).
+ */
+function seedDelegatedChild(w, parent, id = "session-child", depth = 1) {
+  const childLog = [
+    { type: "sandbox/mode", data: { mode: FULL, source: "delegation" } },
+    { type: "approval/policy", data: { policy: "never", source: "delegation" } },
+  ];
+  const child = makeSession(
+    id,
+    childLog,
+    { parentSession: parent.id, origin: "subagent", delegationDepth: depth },
+    w,
+  );
+  const childAgent = { session: child };
+  w.ctx.__agents.set(child.id, childAgent);
+  const bootstrap = { type: "permission/preset", data: { preset: FULL } };
+  childLog.push(bootstrap);
+  emit(w, child, bootstrap.type, bootstrap.data);
+  return { child, childAgent, childLog };
 }
 
 async function main() {
@@ -965,6 +1199,392 @@ async function main() {
     };
     const pe = await preExecute(w, { agent: grandAgent, name: "bash", parent: undefined, arguments: {} });
     check("the grandchild is judged through the chain", judged === 1 && pe.claimed === true, "judged=" + judged);
+  }
+
+  // ---- the inherited review is a STANDARD, DURABLE preset identity ---------
+  // A delegated child of a 自动审查 session runs danger-full-access + never
+  // (the host's delegation pin). The permission menu derives its entry from
+  // those knob values, so without help the child would be reported as plain
+  // "Full access" — a menu that contradicts the mode that actually covers
+  // it. The plugin therefore records the inherited identity as a standard
+  // `permission/preset` event and wraps the preset service's derive() so the
+  // identity stays visible. The child's knobs are NOT touched: the marker
+  // names the mode the child is covered by, it does not re-configure it.
+
+  section("继承子代理写入标准 agent-review 标记（不改 Full+never 旋钮）");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const { parent } = seedReviewedParent(w);
+    const { child, childAgent, childLog } = seedDelegatedChild(w, parent);
+    agentCreated(w, childAgent);
+
+    const markers = markerEvents(childLog);
+    check(
+      "the inherited child records exactly one review marker",
+      markers.length === 1,
+      "markers=" + JSON.stringify(markers.map((m) => m.data)),
+    );
+    check(
+      "the marker names the agent-review preset",
+      markers.length === 1 && markers[0].data.preset === PRESET_REVIEW,
+      "preset=" + (markers.length === 1 ? markers[0].data.preset : "(none)"),
+    );
+    check(
+      "the marker carries the plugin's own inherited-review source",
+      markers.length === 1 && isInheritedSource(markers[0].data.source),
+      "source=" +
+        (markers.length === 1 ? markers[0].data.source : "(none)") +
+        " expected=" +
+        INHERITED_SOURCE.value +
+        " discovered=" +
+        INHERITED_SOURCE.discovered,
+    );
+    check(
+      "the marker is the child's effective preset identity",
+      lastPresetOf(childLog) === PRESET_REVIEW,
+      "last=" + lastPresetOf(childLog),
+    );
+    check(
+      "the child's Full+never knobs are untouched by the plugin",
+      countEvents(childLog, "sandbox/mode") === 1 && countEvents(childLog, "approval/policy") === 1,
+      "knobs=" +
+        JSON.stringify(
+          childLog.filter((e) => e.type === "sandbox/mode" || e.type === "approval/policy"),
+        ),
+    );
+    check(
+      "the child's approval policy was never rewritten to ask",
+      w.policies.every((p) => p.agentId !== child.id),
+      "policies=" + JSON.stringify(w.policies),
+    );
+    check(
+      "the inherited child keeps no own mode entry",
+      modeOf(w, child) === "off",
+      "mode=" + modeOf(w, child),
+    );
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const pe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the inherited child is judged", judged === 1 && pe.claimed === true, "judged=" + judged);
+  }
+
+  section("继承状态显示 agent-review；普通 Full+never 仍显示 danger-full-access");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const { parent } = seedReviewedParent(w);
+    const { child, childAgent } = seedDelegatedChild(w, parent);
+    agentCreated(w, childAgent);
+
+    check(
+      "the inherited child's displayed preset is agent-review",
+      w.presets.current(child) === PRESET_REVIEW,
+      "displayed=" + w.presets.current(child),
+    );
+    check(
+      "the reviewed parent still displays agent-review",
+      w.presets.current(parent) === PRESET_REVIEW,
+      "displayed=" + w.presets.current(parent),
+    );
+
+    // A plain Full access + never session with no preset identity at all.
+    const plainLog = [
+      { type: "sandbox/mode", data: { mode: FULL } },
+      { type: "approval/policy", data: { policy: "never" } },
+    ];
+    const plain = makeSession("session-plain", plainLog, undefined, w);
+    w.ctx.__agents.set(plain.id, { session: plain });
+    check(
+      "a plain Full+never session still displays danger-full-access",
+      w.presets.current(plain) === "danger-full-access",
+      "displayed=" + w.presets.current(plain),
+    );
+
+    // The same session with the explicit Full-access identity recorded.
+    const explicitLog = plainLog.concat([
+      { type: "permission/preset", data: { preset: "danger-full-access" } },
+    ]);
+    const explicit = makeSession("session-plain-2", explicitLog, undefined, w);
+    w.ctx.__agents.set(explicit.id, { session: explicit });
+    check(
+      "an explicit Full-access identity still displays danger-full-access",
+      w.presets.current(explicit) === "danger-full-access",
+      "displayed=" + w.presets.current(explicit),
+    );
+  }
+
+  section("冷恢复：凭持久化标记恢复审查，且不重复追加");
+  {
+    // The first world creates the inherited child and stamps the marker.
+    const w1 = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w1.inst);
+    w1.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+    const { parent } = seedReviewedParent(w1);
+    const { childAgent, childLog } = seedDelegatedChild(w1, parent);
+    agentCreated(w1, childAgent);
+    check(
+      "the inherited child recorded a durable marker",
+      markerEvents(childLog).length === 1,
+      "markers=" + markerEvents(childLog).length,
+    );
+
+    // Restart: a fresh plugin instance, and the reviewed ancestor is NOT
+    // live any more — only the durable marker can restore the coverage.
+    const persisted = JSON.parse(JSON.stringify(childLog));
+    const before = persisted.length;
+    const w2 = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w2.inst);
+    w2.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+    const restored = makeSession(
+      "session-child",
+      persisted,
+      { parentSession: parent.id, origin: "subagent", delegationDepth: 1 },
+      w2,
+    );
+    const restoredAgent = { session: restored };
+    w2.ctx.__agents.set(restored.id, restoredAgent);
+    agentCreated(w2, restoredAgent);
+
+    let judged = 0;
+    w2.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const pe = await preExecute(w2, { agent: restoredAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the cold-restored child is judged again", judged === 1 && pe.claimed === true, "judged=" + judged);
+    check(
+      "the persisted marker is not appended twice",
+      markerEvents(persisted).length === 1,
+      "markers=" + markerEvents(persisted).length,
+    );
+    check(
+      "the cold restore writes no new session event",
+      persisted.length === before,
+      "log grew by " + (persisted.length - before),
+    );
+    check(
+      "the cold-restored child keeps no own mode entry",
+      modeOf(w2, restored) === "off",
+      "mode=" + modeOf(w2, restored),
+    );
+    check(
+      "the cold-restored child's knobs are still Full+never",
+      knobOf(persisted, "sandbox/mode", "mode") === FULL &&
+        knobOf(persisted, "approval/policy", "policy") === "never",
+      "knobs=" +
+        JSON.stringify(
+          persisted.filter((e) => e.type === "sandbox/mode" || e.type === "approval/policy"),
+        ),
+    );
+    check(
+      "the cold-restored child still displays agent-review",
+      w2.presets.current(restored) === PRESET_REVIEW,
+      "displayed=" + w2.presets.current(restored),
+    );
+  }
+
+  section("继承后显式选择 Full/其它预设仍然退出，重发布不复活");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const { parent } = seedReviewedParent(w);
+    const { child, childAgent, childLog } = seedDelegatedChild(w, parent);
+    agentCreated(w, childAgent);
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const inherited = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the inherited child starts out judged", judged === 1 && inherited.claimed === true, "judged=" + judged);
+
+    // The child explicitly picks Full access.
+    const explicitFull = { type: "permission/preset", data: { preset: "danger-full-access" } };
+    childLog.push(explicitFull);
+    emit(w, child, explicitFull.type, explicitFull.data);
+    const afterFull = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check(
+      "an explicit Full-access choice stops the inherited review",
+      judged === 1 && afterFull.claimed === false,
+      "judged=" + judged,
+    );
+    check(
+      "the displayed preset follows the explicit choice",
+      w.presets.current(child) === "danger-full-access",
+      "displayed=" + w.presets.current(child),
+    );
+
+    // Re-publication (restart-like) must not resurrect it.
+    const disposed = w.listeners.find((l) => l.event === "session/disposed");
+    disposed.fn(child);
+    agentCreated(w, childAgent);
+    const afterRepublish = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check(
+      "re-publication does not resurrect the inherited review",
+      judged === 1 && afterRepublish.claimed === false,
+      "judged=" + judged,
+    );
+    check(
+      "re-publication appends no second marker",
+      markerEvents(childLog).length === 1,
+      "markers=" + markerEvents(childLog).length,
+    );
+    check(
+      "the explicit choice stays the latest identity",
+      lastPresetOf(childLog) === "danger-full-access",
+      "last=" + lastPresetOf(childLog),
+    );
+
+    // The same for a child that explicitly picks another preset.
+    const { child: child2, childAgent: childAgent2, childLog: childLog2 } = seedDelegatedChild(
+      w,
+      parent,
+      "session-child-2",
+    );
+    agentCreated(w, childAgent2);
+    const other = { type: "permission/preset", data: { preset: READ_ONLY } };
+    childLog2.push(other);
+    emit(w, child2, other.type, other.data);
+    const afterOther = await preExecute(w, { agent: childAgent2, name: "bash", parent: undefined, arguments: {} });
+    check(
+      "an explicit read-only choice stops the inherited review",
+      judged === 1 && afterOther.claimed === false,
+      "judged=" + judged,
+    );
+    disposed.fn(child2);
+    agentCreated(w, childAgent2);
+    const afterOtherRepublish = await preExecute(w, { agent: childAgent2, name: "bash", parent: undefined, arguments: {} });
+    check(
+      "re-publication does not resurrect that opt-out either",
+      judged === 1 && afterOtherRepublish.claimed === false,
+      "judged=" + judged,
+    );
+    check(
+      "that child kept exactly one marker",
+      markerEvents(childLog2).length === 1,
+      "markers=" + markerEvents(childLog2).length,
+    );
+  }
+
+  section("父会话后进入 review 时已有子代理也获得标记");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    // The parent is NOT reviewed yet — the child is created first.
+    const parentLog = [];
+    seedUserKnobs(parentLog);
+    const parent = makeSession("session-parent", parentLog, undefined, w);
+    const parentAgent = { session: parent };
+    w.ctx.__agents.set(parent.id, parentAgent);
+    const { child, childAgent, childLog } = seedDelegatedChild(w, parent);
+    agentCreated(w, childAgent);
+    check(
+      "no marker before the parent enters review",
+      markerEvents(childLog).length === 0,
+      "markers=" + markerEvents(childLog).length,
+    );
+
+    // Now the parent switches to 自动审查.
+    parentLog.push({ type: "permission/preset", data: { preset: PRESET_REVIEW } });
+    emit(w, parent, "permission/preset", { preset: PRESET_REVIEW });
+
+    const markers = markerEvents(childLog);
+    check(
+      "the already-created child receives the marker",
+      markers.length === 1,
+      "markers=" + JSON.stringify(markers.map((m) => m.data)),
+    );
+    check(
+      "the late marker carries the inherited-review source",
+      markers.length === 1 && isInheritedSource(markers[0].data.source),
+      "source=" + (markers.length === 1 ? markers[0].data.source : "(none)"),
+    );
+    check(
+      "the late-covered child's knobs stay untouched",
+      countEvents(childLog, "sandbox/mode") === 1 && countEvents(childLog, "approval/policy") === 1,
+      "knobs=" +
+        JSON.stringify(
+          childLog.filter((e) => e.type === "sandbox/mode" || e.type === "approval/policy"),
+        ),
+    );
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const pe = await preExecute(w, { agent: childAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the late-covered child is judged", judged === 1 && pe.claimed === true, "judged=" + judged);
+    check(
+      "the late-covered child displays agent-review",
+      w.presets.current(child) === PRESET_REVIEW,
+      "displayed=" + w.presets.current(child),
+    );
+  }
+
+  section("孙代理同样获得标记");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const { parent } = seedReviewedParent(w);
+    const { child, childAgent } = seedDelegatedChild(w, parent);
+    agentCreated(w, childAgent);
+    const { child: grand, childAgent: grandAgent, childLog: grandLog } = seedDelegatedChild(
+      w,
+      child,
+      "session-grand",
+      2,
+    );
+    agentCreated(w, grandAgent);
+
+    const markers = markerEvents(grandLog);
+    check(
+      "the grandchild records its own marker",
+      markers.length === 1,
+      "markers=" + JSON.stringify(markers.map((m) => m.data)),
+    );
+    check(
+      "the grandchild's marker carries the inherited-review source",
+      markers.length === 1 && isInheritedSource(markers[0].data.source),
+      "source=" + (markers.length === 1 ? markers[0].data.source : "(none)"),
+    );
+    check(
+      "the grandchild's knobs stay untouched",
+      countEvents(grandLog, "sandbox/mode") === 1 && countEvents(grandLog, "approval/policy") === 1,
+      "knobs=" +
+        JSON.stringify(
+          grandLog.filter((e) => e.type === "sandbox/mode" || e.type === "approval/policy"),
+        ),
+    );
+
+    let judged = 0;
+    w.inst._reviewCall = async () => {
+      judged += 1;
+      return { kind: "deny", info: { name: "AgentReviewDeniedError" } };
+    };
+    const pe = await preExecute(w, { agent: grandAgent, name: "bash", parent: undefined, arguments: {} });
+    check("the grandchild is judged through the chain", judged === 1 && pe.claimed === true, "judged=" + judged);
+    check(
+      "the grandchild displays agent-review",
+      w.presets.current(grand) === PRESET_REVIEW,
+      "displayed=" + w.presets.current(grand),
+    );
   }
 
   // ---- post-denial re-approval (v1.11.0, Guardian-style overturn) ----------

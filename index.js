@@ -215,6 +215,26 @@ const REVIEW_PRESET_NAME = "agent-review";
 /** The review preset's sandbox base (the mode pins the session here). */
 const REVIEW_BASE_MODE = "danger-full-access";
 /**
+ * The `data.source` marker this plugin stamps on the `permission/preset`
+ * event it appends for an INHERITED 自动审查 selection (a delegated child of
+ * a reviewed session).
+ *
+ * The host's own preset events carry no `source`; the delegation-seeded knob
+ * events use `source: "delegation"`. This marker is what separates "the user
+ * picked 自动审查" from "this session inherits 自动审查 from its ancestor":
+ * the former arms the review mode for the session ITSELF (Full access +
+ * `ask`), the latter must NOT touch the child's knobs (the host pinned
+ * danger-full-access + `never` there) and must never be mistaken for an
+ * explicit user choice on re-publication.
+ */
+const INHERITED_REVIEW_SOURCE = "agent-approval/inherited-review";
+/**
+ * Marker property on our `permissionPresets.derive` wrapper — keeps a second
+ * installation from wrapping the wrapper (and lets the wrapper be recognised
+ * as ours).
+ */
+const REVIEW_DERIVE_FLAG = "__dshAgentApprovalReviewDerive";
+/**
  * The outer PTC transport tool name — deliberately EXCLUDED from per-call
  * review (aligned with the official auto-review scope). Its INNER calls are
  * ordinary tools and are judged on their own merits by `reviewScopeCovers`.
@@ -806,6 +826,17 @@ export class AgentApprovalService extends TypertRemoteService {
       this._judgeContext.observe(session, event);
       try {
         if (!event || event.type !== "permission/preset") return;
+        // Our OWN inheritance marker (see `_markInheritedReview`): the
+        // session inherits 自动审查 from its ancestor. It is NOT a user
+        // choice — the child's knobs are the host's delegation pin
+        // (danger-full-access + never) and must stay exactly that — so
+        // restore the inherited coverage and clear the provisional opt-out,
+        // but never arm the review mode here and never touch a knob.
+        if (this._isInheritedReviewPreset(event)) {
+          this._reviewInherited.add(session.id);
+          this._reviewOptOut.delete(session.id);
+          return;
+        }
         const name = event.data && event.data.preset;
         if (name === PRESET_NAME) {
           this._reviewOptOut.add(session.id);
@@ -881,13 +912,17 @@ export class AgentApprovalService extends TypertRemoteService {
         // Snapshot the inherited review for a delegated child: the host gave
         // it the parent's Full-access sandbox but never our preset, so
         // without this the child would run machine-changing commands with
-        // nobody judging them once the parent is gone.
+        // nobody judging them once the parent is gone. A child that already
+        // carries our durable inheritance marker restores the coverage even
+        // when the ancestor is no longer live (cold recovery after a
+        // restart).
         if (
           !this._enabled.has(agent.session.id) &&
           !this._reviewOptOut.has(agent.session.id) &&
-          this._ancestorInReviewMode(agent.session)
+          (this._ancestorInReviewMode(agent.session) ||
+            this._isInheritedReviewSelected(agent.session))
         ) {
-          this._reviewInherited.add(agent.session.id);
+          this._markInheritedReview(agent.session);
         }
         if (this._enabled.has(agent.session.id)) return;
         if (preset === REVIEW_PRESET_NAME) {
@@ -1004,6 +1039,19 @@ export class AgentApprovalService extends TypertRemoteService {
       });
     });
 
+    // The permission service derives the menu entry from the effective knob
+    // values, so a delegated child of a reviewed session (danger-full-access
+    // + never, the host's delegation pin) would be reported as plain
+    // "danger-full-access" — the menu would contradict the mode that
+    // actually covers it. Wrap `derive` (reversible via ctx.effect) so the
+    // inherited 自动审查 selection stays visible as 自动审查. Installed now
+    // (the permission service is part of the base composition) and again
+    // through inject in case it is composed later.
+    this._installReviewDerive();
+    this.ctx.inject(["permissionPresets"], () => {
+      this._installReviewDerive();
+    });
+
     // Hydrate persisted settings + audit records (never throws).
     await this._loadPersisted();
   }
@@ -1107,9 +1155,124 @@ export class AgentApprovalService extends TypertRemoteService {
       const event = events[i];
       if (event.type !== "permission/preset") continue;
       if (this._isDelegatedBootstrapPreset(session, events, i)) continue;
+      // Our own inheritance marker is not a user choice either: it must not
+      // be read as "the user picked 自动审查 here" (that would arm the review
+      // mode on a delegated child and fight the host's knob pin), and it
+      // must not let a session that opted out LATER be pulled back in.
+      if (this._isInheritedReviewPreset(event)) continue;
       return event.data && event.data.preset;
     }
     return undefined;
+  }
+
+  /**
+   * Whether one event is OUR inheritance marker: a `permission/preset`
+   * selection of 自动审查 stamped with `source: agent-approval/inherited-review`.
+   */
+  _isInheritedReviewPreset(event) {
+    if (!event || event.type !== "permission/preset") return false;
+    const data = event.data;
+    if (!data || typeof data !== "object") return false;
+    if (data.preset !== REVIEW_PRESET_NAME) return false;
+    return data.source === INHERITED_REVIEW_SOURCE;
+  }
+
+  /**
+   * Whether the session's latest EFFECTIVE preset selection is our
+   * inheritance marker — the durable half of "this session inherits
+   * 自动审查". Used for cold recovery: a delegated child whose ancestor is
+   * no longer live still restores its inherited review from this marker.
+   *
+   * "Latest effective selection" = the last `permission/preset` event that
+   * is not the Host's delegated bootstrap identity. A LATER explicit preset
+   * therefore wins: the marker never revives an opted-out session.
+   */
+  _isInheritedReviewSelected(session) {
+    const events = this._eventsOf(session);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.type !== "permission/preset") continue;
+      if (this._isDelegatedBootstrapPreset(session, events, i)) continue;
+      return this._isInheritedReviewPreset(event);
+    }
+    return false;
+  }
+
+  /**
+   * Record the inherited review for one session: mark it in memory and stamp
+   * the durable marker preset event, so the permission menu shows 自动审查
+   * for the child instead of the knob-derived "danger-full-access".
+   *
+   * The child's knobs are NOT touched — the host's delegation pin
+   * (danger-full-access + `never`) is the child's real permission state, and
+   * the marker only names the mode the child is actually covered by. The
+   * append is skipped when the marker is already the effective selection.
+   */
+  _markInheritedReview(session) {
+    if (!session || typeof session.id !== "string") return;
+    this._reviewInherited.add(session.id);
+    if (!this._presetRegistered(REVIEW_PRESET_NAME)) return;
+    if (this._isInheritedReviewSelected(session)) return; // already the marker
+    try {
+      session.append("permission/preset", {
+        preset: REVIEW_PRESET_NAME,
+        source: INHERITED_REVIEW_SOURCE,
+      });
+    } catch (e) {
+      /* the session may refuse the append; the in-memory coverage stands */
+    }
+  }
+
+  /**
+   * Wrap the permission service's `derive` so an inherited 自动审查
+   * selection stays visible as 自动审查.
+   *
+   * The host derives the menu entry from the EFFECTIVE KNOB VALUES: the
+   * delegated child of a reviewed session runs danger-full-access + `never`
+   * (the host pins both), while our preset table declares 自动审查 as
+   * danger-full-access + `ask` — so the official derive never matches it and
+   * falls through to the plain Full-access entry. The menu would then claim
+   * "Full access" for a session that is actually reviewed.
+   *
+   * The wrapper changes NOTHING but the NAME it reports for exactly that one
+   * state (preset = 自动审查 + Full access + never); every other state is
+   * delegated to the original implementation with its original `this`. No
+   * knob is read or written here.
+   *
+   * Removable: the original implementation is restored when this plugin
+   * unloads (ctx.effect). A Host without `derive` — or without an effect
+   * channel to restore through — is left untouched.
+   */
+  _installReviewDerive() {
+    try {
+      const presets = this.ctx.get("permissionPresets");
+      if (presets === undefined) return;
+      const original = presets.derive;
+      if (typeof original !== "function") return; // old Host without derive
+      if (original[REVIEW_DERIVE_FLAG] === true) return; // already wrapped
+      if (typeof this.ctx.effect !== "function") return; // no restore channel
+      const wrapper = function (state) {
+        if (
+          state !== null &&
+          typeof state === "object" &&
+          state.preset === REVIEW_PRESET_NAME &&
+          state.sandbox === REVIEW_BASE_MODE &&
+          state.approval === "never"
+        ) {
+          return REVIEW_PRESET_NAME;
+        }
+        return original.call(this, state);
+      };
+      wrapper[REVIEW_DERIVE_FLAG] = true;
+      this.ctx.effect(() => {
+        presets.derive = wrapper;
+        return () => {
+          if (presets.derive === wrapper) presets.derive = original;
+        };
+      }, "agent-approval.reviewDerive()");
+    } catch (e) {
+      /* the menu falls back to the host's own derive */
+    }
   }
 
   /**
@@ -2425,6 +2588,8 @@ export class AgentApprovalService extends TypertRemoteService {
    * Snapshot every currently live descendant covered by review. This runs
    * when a session ENTERS review so a child created earlier keeps its coverage
    * if the reviewed ancestor is disposed before the child's next tool call.
+   * The marker preset event is stamped on the child too, so its permission
+   * menu shows 自动审查 instead of the plain Full-access entry.
    */
   _snapshotReviewDescendants() {
     try {
@@ -2432,7 +2597,7 @@ export class AgentApprovalService extends TypertRemoteService {
       for (const agent of this.ctx.agents.list()) {
         const session = agent && agent.session;
         if (!session || this._enabled.has(session.id) || this._reviewOptOut.has(session.id)) continue;
-        if (this._ancestorInReviewMode(session)) this._reviewInherited.add(session.id);
+        if (this._ancestorInReviewMode(session)) this._markInheritedReview(session);
       }
     } catch (e) {
       /* best-effort snapshot; the live lineage still covers normal operation */
@@ -3464,7 +3629,10 @@ export class AgentApprovalService extends TypertRemoteService {
       ok: true,
       value: {
         records: await this._recordsOf(agent.session),
-        enabled: this._enabled.has(sessionId),
+        // An inherited-review child has no own `_enabled` entry, but it IS
+        // covered — reporting "not enabled" above its own review records
+        // would contradict the mode that produced them.
+        enabled: this._enabled.has(sessionId) || this._reviewCovers(agent.session),
       },
     };
   }
@@ -3493,7 +3661,9 @@ export class AgentApprovalService extends TypertRemoteService {
         ok: true,
         value: {
           records: page.records,
-          enabled: this._enabled.has(sessionId),
+          // Same rule as the legacy method: an inherited-review child counts
+          // as enabled even without an own `_enabled` entry.
+          enabled: this._enabled.has(sessionId) || this._reviewCovers(agent.session),
           nextCursor: page.nextCursor,
           // Older-page responses never move the client's append sync cursor.
           // `null` and `undefined` both mean "no before cursor" here, exactly

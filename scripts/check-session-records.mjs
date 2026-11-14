@@ -86,6 +86,25 @@ async function main() {
     assert.equal(legacy.value.enabled, true);
     ok("legacy sessionRecords keeps its full id-less ascending shape");
 
+    // An inherited-review child has no own _enabled entry, but both audit
+    // endpoints must still report the effective mode instead of displaying
+    // the contradictory "not enabled" badge above real review records.
+    inst._enabled = new Map();
+    inst._reviewOptOut = new Set();
+    inst._reviewInherited = new Set([session.id]);
+    const inheritedLegacy = await inst.sessionRecords({ sessionId: session.id });
+    assert.equal(inheritedLegacy.ok, true);
+    assert.equal(inheritedLegacy.value.enabled, true);
+    const inheritedPage = strictPage(await inst.sessionRecordsPage({ sessionId: session.id, limit: 1 }));
+    assert.equal(inheritedPage.ok, true);
+    assert.equal(inheritedPage.value.enabled, true);
+    inst._reviewOptOut.add(session.id);
+    const optedOut = await inst.sessionRecords({ sessionId: session.id });
+    assert.equal(optedOut.ok, true);
+    assert.equal(optedOut.value.enabled, false);
+    inst._reviewOptOut.delete(session.id);
+    ok("legacy and paged audit state both recognize inherited review and its explicit opt-out");
+
     const first = strictPage(await inst.sessionRecordsPage({ sessionId: session.id, limit: 100 }));
     assert.equal(first.ok, true);
     assert.equal(first.value.records.length, 100);
@@ -140,6 +159,8 @@ async function main() {
     const oracleInst = Object.create(AgentApprovalService.prototype);
     oracleInst.ctx = { agents: { get: (id) => (id === oracleSession.id ? { session: oracleSession } : undefined) } };
     oracleInst._enabled = new Map();
+    oracleInst._reviewOptOut = new Set();
+    oracleInst._reviewInherited = new Set();
     oracleInst._auditStore = new AuditRecordStore((sid, row) => oracleInst._recordShape(sid, row));
     const oracleFile = join(oracleDir, "agent-approval.jsonl");
     oracleInst._recordsFileOf = async () => oracleFile;
