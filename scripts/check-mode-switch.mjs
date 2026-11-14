@@ -269,6 +269,10 @@ function buildWorld() {
       // Capture the model-facing context registrations (the review-mode
       // notice the plugin injects per session).
       scope.systemPrompt = { context: (entry) => contexts.push(entry) };
+      // Capture the command registrations so the harness can invoke the
+      // REAL handlers (e.g. the no-argument status reply of /agent-review
+      // and /agent-approval) instead of re-implementing them.
+      scope.commands = { register: (definition) => commands.set(definition.name, definition) };
       // The preset service is a composed dependency: hand the very same
       // service object over, so a wrapper installed through injection is the
       // one `ctx.get("permissionPresets")` returns.
@@ -377,6 +381,17 @@ function knobOf(log, type, field) {
     if (log[i].type === type) return log[i].data[field];
   }
   return undefined;
+}
+
+/**
+ * Invoke a registered command's REAL handler with the given raw input and
+ * return its reply. The handler is the shipped one — the harness never
+ * re-implements a status reply.
+ */
+function runCommand(w, name, rawInput, agent) {
+  const def = w.commands.get(name);
+  if (def === undefined) throw new Error("harness: command not registered: " + name);
+  return def.handler({ rawInput, agent });
 }
 
 function modeOf(world, session) {
@@ -1199,6 +1214,156 @@ async function main() {
     };
     const pe = await preExecute(w, { agent: grandAgent, name: "bash", parent: undefined, arguments: {} });
     check("the grandchild is judged through the chain", judged === 1 && pe.claimed === true, "judged=" + judged);
+  }
+
+  // ---- the no-argument status replies must match the EFFECTIVE mode -------
+  // An inherited review child has no own `_enabled` entry, so the replies
+  // used to be computed from that entry alone: /agent-review said "OFF" for
+  // a session whose calls are in fact judged, and /agent-approval said a
+  // bare "OFF" instead of explaining that the session is in 自动审查.
+
+  section("无参命令在继承子代理上不再回 OFF");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    const { parent, parentAgent } = seedReviewedParent(w);
+    const { child, childAgent } = seedDelegatedChild(w, parent);
+    agentCreated(w, childAgent);
+
+    check("the inherited child carries no own mode entry", modeOf(w, child) === "off");
+    check("the inherited child IS covered by the review", w.inst._reviewCovers(child) === true);
+
+    // --- /agent-review on the inherited child ---
+    const reviewReply = runCommand(w, "agent-review", "", childAgent);
+    check(
+      "inherited child: /agent-review does not answer OFF",
+      typeof reviewReply.text === "string" && reviewReply.text.indexOf("OFF") < 0,
+      reviewReply.text,
+    );
+    check(
+      "inherited child: /agent-review answers ON",
+      typeof reviewReply.text === "string" && reviewReply.text.indexOf("agent-review is ON") >= 0,
+      reviewReply.text,
+    );
+    check(
+      "inherited child: /agent-review says it is inherited",
+      typeof reviewReply.text === "string" &&
+        reviewReply.text.indexOf("inherited from an ancestor session") >= 0,
+      reviewReply.text,
+    );
+
+    // --- /agent-approval on the inherited child ---
+    const approvalReply = runCommand(w, "agent-approval", "", childAgent);
+    check(
+      "inherited child: /agent-approval is not a bare ON",
+      typeof approvalReply.text === "string" && approvalReply.text.indexOf("agent-approval is ON") < 0,
+      approvalReply.text,
+    );
+    check(
+      "inherited child: /agent-approval explains 自动审查",
+      typeof approvalReply.text === "string" &&
+        approvalReply.text.indexOf("OFF (this session is in 自动审查 per-call review mode)") >= 0,
+      approvalReply.text,
+    );
+
+    // --- an own review session (the parent) keeps its own wording ---
+    const parentReview = runCommand(w, "agent-review", "", parentAgent);
+    check(
+      "own review session: /agent-review answers ON",
+      typeof parentReview.text === "string" && parentReview.text.indexOf("agent-review is ON") >= 0,
+      parentReview.text,
+    );
+    check(
+      "own review session: /agent-review does not claim inheritance",
+      typeof parentReview.text === "string" &&
+        parentReview.text.indexOf("inherited from an ancestor session") < 0,
+      parentReview.text,
+    );
+    const parentApproval = runCommand(w, "agent-approval", "", parentAgent);
+    check(
+      "own review session: /agent-approval explains 自动审查",
+      typeof parentApproval.text === "string" &&
+        parentApproval.text.indexOf("OFF (this session is in 自动审查 per-call review mode)") >= 0,
+      parentApproval.text,
+    );
+  }
+
+  section("自有 review / escalation 会话的无参回执不回退");
+  {
+    const w = buildWorld();
+    await AgentApprovalService.prototype[Service.init].call(w.inst);
+    w.inst._jev = { apiKey: "k", endpoint: "e", model: "m", confidence: 0.5 };
+
+    // --- an own 自动审批 session ---
+    const escLog = [];
+    seedUserKnobs(escLog);
+    const escSession = makeSession("session-escalation", escLog);
+    const escAgent = { session: escSession };
+    w.ctx.__agents.set(escSession.id, escAgent);
+    emit(w, escSession, "permission/preset", { preset: PRESET_APPROVAL });
+    check("the escalation session is in 自动审批", modeOf(w, escSession) === "escalation");
+
+    const escApproval = runCommand(w, "agent-approval", "", escAgent);
+    check(
+      "own escalation session: /agent-approval answers ON",
+      typeof escApproval.text === "string" && escApproval.text.indexOf("agent-approval is ON") >= 0,
+      escApproval.text,
+    );
+    const escReview = runCommand(w, "agent-review", "", escAgent);
+    check(
+      "own escalation session: /agent-review answers OFF",
+      typeof escReview.text === "string" && escReview.text.indexOf("agent-review is OFF") >= 0,
+      escReview.text,
+    );
+    check(
+      "own escalation session: /agent-review does not claim inheritance",
+      typeof escReview.text === "string" &&
+        escReview.text.indexOf("inherited from an ancestor session") < 0,
+      escReview.text,
+    );
+
+    // --- an ordinary session with no mode at all ---
+    const plainLog = [];
+    const plainSession = makeSession("session-plain-cmd", plainLog);
+    const plainAgent = { session: plainSession };
+    w.ctx.__agents.set(plainSession.id, plainAgent);
+
+    const plainApproval = runCommand(w, "agent-approval", "", plainAgent);
+    check(
+      "unreviewed session: /agent-approval answers plain OFF",
+      typeof plainApproval.text === "string" &&
+        plainApproval.text.indexOf("agent-approval is OFF for this session") >= 0,
+      plainApproval.text,
+    );
+    const plainReview = runCommand(w, "agent-review", "", plainAgent);
+    check(
+      "unreviewed session: /agent-review answers OFF",
+      typeof plainReview.text === "string" && plainReview.text.indexOf("agent-review is OFF") >= 0,
+      plainReview.text,
+    );
+
+    // --- a child that explicitly opted out of the inherited review ---
+    const { parent } = seedReviewedParent(w);
+    const { child: optOut, childAgent: optOutAgent } = seedDelegatedChild(w, parent, "session-optout");
+    agentCreated(w, optOutAgent);
+    emit(w, optOut, "permission/preset", { preset: "danger-full-access" });
+    check("the explicit Full-access choice opts the child out", w.inst._reviewOptOut.has(optOut.id));
+
+    const optOutReview = runCommand(w, "agent-review", "", optOutAgent);
+    check(
+      "opted-out child: /agent-review answers OFF",
+      typeof optOutReview.text === "string" && optOutReview.text.indexOf("agent-review is OFF") >= 0,
+      optOutReview.text,
+    );
+    const optOutApproval = runCommand(w, "agent-approval", "", optOutAgent);
+    check(
+      "opted-out child: /agent-approval answers plain OFF",
+      typeof optOutApproval.text === "string" &&
+        optOutApproval.text.indexOf("agent-approval is OFF for this session") >= 0,
+      optOutApproval.text,
+    );
   }
 
   // ---- the inherited review is a STANDARD, DURABLE preset identity ---------

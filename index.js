@@ -1000,8 +1000,15 @@ export class AgentApprovalService extends TypertRemoteService {
         handler: (invocation) => {
           const arg = invocation.rawInput.trim().toLowerCase();
           if (arg === "") {
-            const entry = this._enabled.get(invocation.agent.session.id);
-            const mode = entry !== undefined ? entry.mode : "off";
+            const session = invocation.agent.session;
+            const entry = this._enabled.get(session.id);
+            // An own entry decides by its own mode. A delegated child of a
+            // reviewed session has NO entry of its own, yet it IS covered by
+            // the review it inherited — its escalations are therefore not
+            // judged here, exactly like a session whose own entry says
+            // "review".
+            const mode =
+              entry !== undefined ? entry.mode : this._reviewCovers(session) ? "review" : "off";
             return {
               kind: "success",
               text:
@@ -1019,16 +1026,26 @@ export class AgentApprovalService extends TypertRemoteService {
       scope.commands.register({
         name: "agent-review",
         description:
-          "Toggle per-call review (自动审查): Full access base; every tool call is reviewed by the configured judge (Jev or LLM) before execution; risky calls are rejected with no human fallback",
+          "Toggle per-call review (自动审查): Full access base; the machine-changing calls (bash/pwsh/write/edit/str_replace_editor and MCP tools mcp__*) are reviewed by the configured judge (Jev or LLM) before execution, while read-only tools are not reviewed; risky calls are rejected with no human fallback",
         input: { hint: "<on|off>" },
         handler: (invocation) => {
           const arg = invocation.rawInput.trim().toLowerCase();
           if (arg === "") {
-            const entry = this._enabled.get(invocation.agent.session.id);
-            const on = entry !== undefined && entry.mode === "review";
+            const session = invocation.agent.session;
+            const entry = this._enabled.get(session.id);
+            // An own entry decides by its own mode ("review" → ON,
+            // "escalation" → OFF). A delegated child has no entry of its own
+            // but IS covered by the review it inherited from an ancestor, so
+            // it must not answer OFF.
+            const own = entry !== undefined;
+            const on = own ? entry.mode === "review" : this._reviewCovers(session);
             return {
               kind: "success",
-              text: "agent-review is " + (on ? "ON" : "OFF") + " for this session (usage: /agent-review on|off)",
+              text:
+                "agent-review is " +
+                (on ? "ON" : "OFF") +
+                (on && !own ? " (inherited from an ancestor session)" : "") +
+                " for this session (usage: /agent-review on|off)",
             };
           }
           if (arg !== "on" && arg !== "off") {
@@ -1310,7 +1327,7 @@ export class AgentApprovalService extends TypertRemoteService {
         // selection is what makes the menu display 自动审查.
         session.append("permission/preset", { preset: REVIEW_PRESET_NAME });
       }
-      return "自动审查 ON: sandbox base is danger-full-access; every tool call is reviewed by the configured judge (Jev or LLM) before execution (denials are final, no human fallback)";
+      return "自动审查 ON: sandbox base is danger-full-access; bash/pwsh/write/edit/str_replace_editor and MCP tools mcp__* are reviewed by the configured judge (Jev or LLM) before execution, while read-only tools are not reviewed (denials are final, no human fallback)";
     }
     if (entry === undefined || entry.mode !== "review") return "自动审查 is not ON for this session";
     return this._disable(agent, true);
