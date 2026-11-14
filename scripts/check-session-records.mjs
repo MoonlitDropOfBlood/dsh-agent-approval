@@ -60,6 +60,44 @@ function legacyOracle(text, shape) {
   return out;
 }
 
+/**
+ * A minimal stand-in for the Host's durable-session seam (`ctx.sessionPersistence`):
+ * `stat(id)` proves the session exists and names its log revision, `open(id,
+ * "read")` hands out a read handle whose `read(0)` returns the persisted
+ * events, and `resolveCurrentLog(id)` locates the session's own log file — the
+ * audit sidecar lives in that directory. Every call is counted so the
+ * regression can prove that an unchanged revision is never re-read.
+ */
+function mockPersistence(state) {
+  return {
+    async stat(id) {
+      state.statCount += 1;
+      const entry = state.sessions.get(id);
+      return entry === undefined ? undefined : entry.stat;
+    },
+    async open(id) {
+      const entry = state.sessions.get(id);
+      if (entry === undefined) throw new Error("no such session: " + id);
+      state.openCount += 1;
+      let closed = false;
+      return {
+        async read(offset) {
+          state.readCount += 1;
+          if (closed) throw new Error("read on a closed handle");
+          return { events: entry.events.slice(offset) };
+        },
+        async close() {
+          closed = true;
+          state.closeCount += 1;
+        },
+      };
+    },
+    async resolveCurrentLog(id) {
+      return state.logPaths.get(id);
+    },
+  };
+}
+
 async function main() {
   const dir = await mkdtemp(join(tmpdir(), "aapr-session-records-"));
   try {
@@ -192,6 +230,159 @@ async function main() {
     assert.equal(absent.ok, true);
     assert.deepEqual(absent.value.records, []);
     ok("a missing audit file still yields an empty legacy list");
+
+    // ---- v1.12.5: a session that is no longer live must still be readable ---
+    //
+    // A finished subagent has no live agent any more, but its audit sidecar
+    // and its durable log are still there. The Host must read them instead of
+    // refusing with "that session is not live right now".
+    const coldDir = join(dir, "cold");
+    await mkdir(coldDir, { recursive: true });
+    const coldId = "session-cold-child";
+    const coldFile = join(coldDir, "agent-approval.jsonl");
+    await writeFile(
+      coldFile,
+      [entry(coldId, 0, "2026-02-01T00:00:00.000Z"), entry(coldId, 1, "2026-02-02T00:00:00.000Z")]
+        .map((row) => JSON.stringify(row))
+        .join("\n") + "\n",
+      "utf8",
+    );
+    // The delegated-child shape: the Host's delegation pin (danger-full-access
+    // + never), the preset identity derived from it, and OUR inheritance
+    // marker for the inherited 自动审查 coverage.
+    const delegatedEvents = [
+      { type: "sandbox/mode", data: { mode: "danger-full-access", source: "delegation" } },
+      { type: "approval/policy", data: { policy: "never", source: "delegation" } },
+      { type: "permission/preset", data: { preset: "danger-full-access" } },
+      { type: "permission/preset", data: { preset: "agent-review", source: "agent-approval/inherited-review" } },
+    ];
+    const state = {
+      sessions: new Map(),
+      logPaths: new Map(),
+      statCount: 0,
+      openCount: 0,
+      readCount: 0,
+      closeCount: 0,
+    };
+    state.sessions.set(coldId, {
+      stat: {
+        header: { id: coldId, origin: "subagent", parentSession: "session-parent" },
+        revision: "rev-1",
+      },
+      events: delegatedEvents,
+    });
+    state.logPaths.set(coldId, join(coldDir, "session.jsonl.zstd"));
+    const persistence = mockPersistence(state);
+
+    const cold = Object.create(AgentApprovalService.prototype);
+    cold.ctx = {
+      // The agent is gone: this is a disposed session.
+      agents: { get: () => undefined },
+      get: (name) => (name === "sessionPersistence" ? persistence : undefined),
+    };
+    cold._enabled = new Map();
+    cold._reviewInherited = new Set();
+    cold._reviewOptOut = new Set();
+    cold._auditStore = new AuditRecordStore((sid, row) => cold._recordShape(sid, row));
+
+    const coldLegacy = await cold.sessionRecords({ sessionId: coldId });
+    assert.equal(coldLegacy.ok, true);
+    assert.equal(coldLegacy.value.records.length, 2);
+    assert.equal(coldLegacy.value.records[0].id, undefined);
+    assert.deepEqual(coldLegacy.value.records.map((row) => row.rationale), ["r-0", "r-1"]);
+    // The inherited marker is the durable proof of the coverage.
+    assert.equal(coldLegacy.value.enabled, true);
+    const coldPage = strictPage(await cold.sessionRecordsPage({ sessionId: coldId, limit: 10 }));
+    assert.equal(coldPage.ok, true);
+    assert.equal(coldPage.value.records.length, 2);
+    assert.equal(coldPage.value.enabled, true);
+    // The sidecar is located through the CURRENT Host's `resolveCurrentLog(id)`
+    // — i.e. the session's own directory, not the plugin-owned fallback.
+    const coldFacade = cold._historicalAudit.get(coldId).facade;
+    assert.equal(await cold._recordsFileOf(coldFacade), coldFile);
+    // Reading history must never re-arm a disposed session.
+    assert.equal(cold._enabled.size, 0);
+    assert.equal(cold._reviewInherited.size, 0);
+    assert.equal(cold._reviewOptOut.size, 0);
+    ok("a disposed session's legacy and paged audit reads work and report the inherited review");
+
+    // The revision did not change: the poll must not re-open or re-read the
+    // historical log.
+    assert.equal(state.openCount, 1);
+    assert.equal(state.readCount, 1);
+    await cold.sessionRecords({ sessionId: coldId });
+    await cold.sessionRecordsPage({ sessionId: coldId, limit: 10 });
+    assert.equal(state.openCount, 1);
+    assert.equal(state.readCount, 1);
+    // Every read handle is closed again.
+    assert.equal(state.closeCount, state.openCount);
+    ok("an unchanged revision reuses the cached history instead of re-reading it");
+
+    // The revision changed: the history is re-read, and a LATER explicit
+    // preset (the opt-out) turns the reported state off while the records
+    // stay readable.
+    state.sessions.get(coldId).stat = {
+      header: { id: coldId, origin: "subagent", parentSession: "session-parent" },
+      revision: "rev-2",
+    };
+    state.sessions.get(coldId).events = delegatedEvents.concat([
+      { type: "permission/preset", data: { preset: "danger-full-access" } },
+    ]);
+    const coldAfter = await cold.sessionRecords({ sessionId: coldId });
+    assert.equal(state.openCount, 2);
+    assert.equal(state.readCount, 2);
+    assert.equal(state.closeCount, state.openCount);
+    assert.equal(coldAfter.ok, true);
+    assert.equal(coldAfter.value.enabled, false);
+    assert.equal(coldAfter.value.records.length, 2);
+    ok("a changed revision refreshes the history and honors a later explicit opt-out");
+
+    // An own preset covers the session too (both of ours). It has no sidecar
+    // of its own, so it yields an empty — but successful — read.
+    const ownDir = join(dir, "own");
+    await mkdir(ownDir, { recursive: true });
+    const ownId = "session-own-preset";
+    state.sessions.set(ownId, {
+      stat: { header: { id: ownId }, revision: "rev-own" },
+      events: [{ type: "permission/preset", data: { preset: "agent-approval" } }],
+    });
+    state.logPaths.set(ownId, join(ownDir, "own.jsonl.zstd"));
+    const own = await cold.sessionRecords({ sessionId: ownId });
+    assert.equal(own.ok, true);
+    assert.equal(own.value.enabled, true);
+    assert.deepEqual(own.value.records, []);
+    // The Host's delegated bootstrap alone is not an explicit exit.
+    const bootDir = join(dir, "boot");
+    await mkdir(bootDir, { recursive: true });
+    const bootId = "session-bootstrap-only";
+    state.sessions.set(bootId, {
+      stat: {
+        header: { id: bootId, origin: "subagent", parentSession: "session-parent" },
+        revision: "rev-boot",
+      },
+      events: delegatedEvents.slice(0, 3),
+    });
+    state.logPaths.set(bootId, join(bootDir, "boot.jsonl.zstd"));
+    const boot = await cold.sessionRecords({ sessionId: bootId });
+    assert.equal(boot.ok, true);
+    assert.equal(boot.value.enabled, false);
+    assert.equal(cold._reviewOptOut.size, 0);
+    ok("own presets cover a historical session while the delegated bootstrap does not opt out");
+
+    // A session that does not exist must NOT look like an empty audit.
+    const absentSession = await cold.sessionRecords({ sessionId: "session-nope" });
+    assert.equal(absentSession.ok, false);
+    assert.equal(absentSession.error.code, "session-not-found");
+    const absentSessionPage = await cold.sessionRecordsPage({ sessionId: "session-nope" });
+    assert.equal(absentSessionPage.ok, false);
+    assert.equal(absentSessionPage.error.code, "session-not-found");
+    // An old Host without the persistence seam keeps the original refusal.
+    const oldHost = Object.create(AgentApprovalService.prototype);
+    oldHost.ctx = { agents: { get: () => undefined }, get: () => undefined };
+    const oldHostResult = await oldHost.sessionRecords({ sessionId: coldId });
+    assert.equal(oldHostResult.ok, false);
+    assert.equal(oldHostResult.error.code, "session-not-live");
+    ok("a missing session is an error and an old Host keeps its session-not-live fallback");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

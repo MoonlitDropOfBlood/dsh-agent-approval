@@ -794,6 +794,15 @@ export class AgentApprovalService extends TypertRemoteService {
     this._judgeContext.attach(this.ctx);
     /** Lazy per-session audit index; no file is read until its audit is viewed. */
     this._auditStore = new AuditRecordStore((sessionId, entry) => this._recordShape(sessionId, entry));
+    /**
+     * v1.12.5: historical (no longer live) sessions, keyed by session id:
+     * { revision, facade, enabled }. The facade is the read-only stand-in
+     * `{ id, header, events }` for a session whose agent is gone but whose
+     * durable log still exists; the revision is the persistence seam's
+     * opaque log revision, so a 10s poll re-reads the historical log only
+     * when it actually changed.
+     */
+    this._historicalAudit = new Map();
 
     // Claim escalations BEFORE the interactive answerer. The host apiproxy
     // answerer registered earlier (composition load order); `{ prepend: true }`
@@ -1205,14 +1214,25 @@ export class AgentApprovalService extends TypertRemoteService {
    * therefore wins: the marker never revives an opted-out session.
    */
   _isInheritedReviewSelected(session) {
+    const event = this._lastEffectivePresetEvent(session);
+    return event === undefined ? false : this._isInheritedReviewPreset(event);
+  }
+
+  /**
+   * The LAST `permission/preset` event that is an effective selection — i.e.
+   * the Host's delegated-child bootstrap identity is skipped, but everything
+   * else (including our own inheritance marker) counts. A LATER explicit
+   * preset therefore wins over an earlier marker.
+   */
+  _lastEffectivePresetEvent(session) {
     const events = this._eventsOf(session);
     for (let i = events.length - 1; i >= 0; i--) {
       const event = events[i];
-      if (event.type !== "permission/preset") continue;
+      if (!event || event.type !== "permission/preset") continue;
       if (this._isDelegatedBootstrapPreset(session, events, i)) continue;
-      return this._isInheritedReviewPreset(event);
+      return event;
     }
-    return false;
+    return undefined;
   }
 
   /**
@@ -1672,7 +1692,7 @@ export class AgentApprovalService extends TypertRemoteService {
    * session is deleted.
    */
   async _recordsFileOf(session) {
-    const persistence = this.ctx.get("sessionPersistence");
+    const persistence = this._sessionPersistence();
     if (persistence !== undefined) {
       try {
         let path;
@@ -3622,36 +3642,180 @@ export class AgentApprovalService extends TypertRemoteService {
   }
 
   /**
+   * The Host's durable-session seam (`ctx.sessionPersistence`), or undefined
+   * when the Host does not provide one. Absent on older Hosts — the audit
+   * endpoints then keep their "session is not live" degradation.
+   */
+  _sessionPersistence() {
+    if (typeof this.ctx.get !== "function") return undefined;
+    try {
+      return this.ctx.get("sessionPersistence");
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  /**
+   * Whether the DURABLE log of a session (live or not) says the mode covers
+   * it. This is the historical fold: it reads the persisted preset events
+   * only and NEVER touches the live bookkeeping (`_enabled`, `_reviewInherited`,
+   * `_reviewOptOut`) — a disposed session must not be re-armed by a read.
+   *
+   * - our own preset (`agent-approval` / `agent-review`) covers the session;
+   * - our inheritance marker (`agent-review` stamped with
+   *   `agent-approval/inherited-review`) covers a delegated child;
+   * - a LATER explicit preset of anything else opts the session out;
+   * - the Host's delegated-child bootstrap (`danger-full-access` derived from
+   *   the delegation pin) is not a user choice and never opts the session out.
+   */
+  _historicalEnabled(session) {
+    const event = this._lastEffectivePresetEvent(session);
+    if (event === undefined) return false;
+    if (this._isInheritedReviewPreset(event)) return true;
+    const preset = event.data && typeof event.data.preset === "string" ? event.data.preset : "";
+    return preset === PRESET_NAME || preset === REVIEW_PRESET_NAME;
+  }
+
+  /**
+   * Resolve the session the audit endpoints must read: the live agent when it
+   * exists, otherwise the DURABLE log of a session that is no longer live.
+   *
+   * A disposed subagent still owns its audit sidecar, so its 审批 tab must
+   * keep working: `sessionPersistence.stat(id)` proves the session exists and
+   * yields its header, and `open(id, "read")` yields the historical events.
+   * This path only READS — no agent is created or restored, no event is
+   * appended, and no knob is touched.
+   */
+  async _resolveAuditSession(sessionId) {
+    const agent = this.ctx.agents.get(sessionId);
+    if (agent !== undefined && agent !== null && agent.session) {
+      return { ok: true, live: true, session: agent.session };
+    }
+    const persistence = this._sessionPersistence();
+    if (
+      persistence === undefined ||
+      persistence === null ||
+      typeof persistence.stat !== "function" ||
+      typeof persistence.open !== "function"
+    ) {
+      // An old Host without the persistence seam: keep the original refusal.
+      return {
+        ok: false,
+        code: "session-not-live",
+        message: "that session is not live right now",
+      };
+    }
+    let snapshot;
+    try {
+      snapshot = await persistence.stat(sessionId);
+    } catch (e) {
+      return {
+        ok: false,
+        code: "session-not-found",
+        message: "no durable session log for " + sessionId,
+      };
+    }
+    if (snapshot === undefined || snapshot === null || typeof snapshot !== "object") {
+      // A session that does not exist must never look like an empty audit.
+      return {
+        ok: false,
+        code: "session-not-found",
+        message: "no durable session log for " + sessionId,
+      };
+    }
+    return { ok: true, live: false, persistence, snapshot };
+  }
+
+  /**
+   * The historical stand-in for one non-live session: `{ id, header, events }`,
+   * shaped like the live Session for every reader we have (`_eventsOf`,
+   * `_recordsFileOf`, the audit store's session key). Cached per session id
+   * and refreshed only when the durable log's revision changed, so the 10s
+   * poll never re-reads the whole historical log.
+   */
+  async _historicalFacade(sessionId, persistence, snapshot) {
+    if (!this._historicalAudit) this._historicalAudit = new Map();
+    const revision =
+      snapshot.revision === undefined || snapshot.revision === null
+        ? null
+        : String(snapshot.revision);
+    const cached = this._historicalAudit.get(sessionId);
+    if (cached !== undefined && revision !== null && cached.revision === revision) {
+      return { facade: cached.facade, enabled: cached.enabled };
+    }
+    // The facade object is REUSED across refreshes so the audit store's
+    // per-session index (keyed by the session object) stays incremental.
+    const facade = cached === undefined ? { id: sessionId, header: snapshot.header, events: [] } : cached.facade;
+    if (snapshot.header !== undefined) facade.header = snapshot.header;
+    let handle;
+    try {
+      handle = await persistence.open(sessionId, "read");
+      const result = await handle.read(0);
+      facade.events = result && Array.isArray(result.events) ? result.events : [];
+    } finally {
+      if (handle !== undefined && handle !== null && typeof handle.close === "function") {
+        try {
+          await handle.close();
+        } catch (e) {
+          /* the read handle is already gone */
+        }
+      }
+    }
+    const enabled = this._historicalEnabled(facade);
+    this._historicalAudit.set(sessionId, { revision, facade, enabled });
+    return { facade, enabled };
+  }
+
+  /**
    * Fold ONE session's audit records out of its sidecar storage (see
    * `_recordsFileOf` / `_recordsOf`). Powers the conversation window's「审批」
    * tab — the records are requested per session and rendered next to the
-   * 轨迹 tab, exactly where they were produced. The session must be live (it
-   * always is when its conversation window is open). Also reports whether
-   * the mode is currently enabled for the session so the tab can show the
-   * state.
+   * 轨迹 tab, exactly where they were produced. The session is normally live
+   * (it always is when its conversation window is open); a session that is no
+   * longer live is read from its durable log instead, so a finished
+   * subagent's history stays visible. Also reports whether the mode is
+   * currently enabled for the session so the tab can show the state.
    */
   async sessionRecords(request) {
     const sessionId = request && typeof request.sessionId === "string" ? request.sessionId : "";
     if (sessionId === "") {
       return { ok: false, error: { code: "invalid-session", message: "sessionId is required" } };
     }
-    const agent = this.ctx.agents.get(sessionId);
-    if (agent === undefined) {
+    const resolved = await this._resolveAuditSession(sessionId);
+    if (resolved.ok !== true) {
+      return { ok: false, error: { code: resolved.code, message: resolved.message } };
+    }
+    if (resolved.live) {
       return {
-        ok: false,
-        error: { code: "session-not-live", message: "that session is not live right now" },
+        ok: true,
+        value: {
+          records: await this._recordsOf(resolved.session),
+          // An inherited-review child has no own `_enabled` entry, but it IS
+          // covered — reporting "not enabled" above its own review records
+          // would contradict the mode that produced them.
+          enabled: this._enabled.has(sessionId) || this._reviewCovers(resolved.session),
+        },
       };
     }
-    return {
-      ok: true,
-      value: {
-        records: await this._recordsOf(agent.session),
-        // An inherited-review child has no own `_enabled` entry, but it IS
-        // covered — reporting "not enabled" above its own review records
-        // would contradict the mode that produced them.
-        enabled: this._enabled.has(sessionId) || this._reviewCovers(agent.session),
-      },
-    };
+    try {
+      const historical = await this._historicalFacade(sessionId, resolved.persistence, resolved.snapshot);
+      return {
+        ok: true,
+        value: {
+          records: await this._recordsOf(historical.facade),
+          // The durable fold, not the (cleared) live bookkeeping.
+          enabled: historical.enabled,
+        },
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: "audit-unavailable",
+          message: error && error.message ? error.message : String(error),
+        },
+      };
+    }
   }
 
   /** Bounded audit pages and physical-line increments; the legacy method above is unchanged. */
@@ -3660,16 +3824,25 @@ export class AgentApprovalService extends TypertRemoteService {
     if (sessionId === "") {
       return { ok: false, error: { code: "invalid-session", message: "sessionId is required" } };
     }
-    const agent = this.ctx.agents.get(sessionId);
-    if (agent === undefined) {
-      return {
-        ok: false,
-        error: { code: "session-not-live", message: "that session is not live right now" },
-      };
+    const resolved = await this._resolveAuditSession(sessionId);
+    if (resolved.ok !== true) {
+      return { ok: false, error: { code: resolved.code, message: resolved.message } };
     }
     try {
-      const file = await this._recordsFileOf(agent.session);
-      const page = await this._auditStore.page(agent.session, file, {
+      // The live session and the historical facade are read the same way; the
+      // facade only stands in for a session whose agent is gone.
+      let session;
+      let enabled;
+      if (resolved.live) {
+        session = resolved.session;
+        enabled = this._enabled.has(sessionId) || this._reviewCovers(session);
+      } else {
+        const historical = await this._historicalFacade(sessionId, resolved.persistence, resolved.snapshot);
+        session = historical.facade;
+        enabled = historical.enabled;
+      }
+      const file = await this._recordsFileOf(session);
+      const page = await this._auditStore.page(session, file, {
         limit: request.limit,
         before: request.before,
         after: request.after,
@@ -3680,7 +3853,7 @@ export class AgentApprovalService extends TypertRemoteService {
           records: page.records,
           // Same rule as the legacy method: an inherited-review child counts
           // as enabled even without an own `_enabled` entry.
-          enabled: this._enabled.has(sessionId) || this._reviewCovers(agent.session),
+          enabled,
           nextCursor: page.nextCursor,
           // Older-page responses never move the client's append sync cursor.
           // `null` and `undefined` both mean "no before cursor" here, exactly
